@@ -1,5 +1,5 @@
 # VoteQuest
-
+ .
 Protótipo React em uma página com PT · Lula e PL · Flávio. No mobile, a tela vira um deck em tela cheia com abas e swipe. O modo demonstrativo vem ligado e exibe 700.000 votos simulados, claramente rotulados. No modo real, o placar mostra pagamentos Pix aprovados e votos manuais separadamente.
 
 ## Rodar localmente
