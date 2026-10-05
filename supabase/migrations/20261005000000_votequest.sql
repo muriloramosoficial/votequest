@@ -1,5 +1,5 @@
 -- VoteQuest backend storage. Run once in the Supabase SQL Editor or with `supabase db push`.
--- Client-side anon/authenticated roles have no table access; Vercel API uses the service role key.
+-- Client-side anon/authenticated roles have no table access; only the Supabase Edge Function uses the service role key.
 
 create extension if not exists pgcrypto;
 

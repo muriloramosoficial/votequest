@@ -1,0 +1,4 @@
+project_id = "tdxhgqmwzppuqzktaymc"
+
+[functions.votequest-api]
+verify_jwt = true

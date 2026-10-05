@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { DEFAULT_PIX_CONFIG } from '../shared/pix-config.js';
+import { apiFetch } from './lib/api.js';
+import { DEFAULT_PIX_CONFIG } from '../supabase/functions/_shared/pix-config.js';
 
 const choices = [
   {
@@ -115,7 +116,7 @@ function VoteQuestPage() {
 
   const refreshVoteStats = useCallback(async () => {
     try {
-      const response = await fetch('/api/pix/results', { cache: 'no-store' });
+      const response = await apiFetch('/api/pix/results', { cache: 'no-store' });
       if (!response.ok) return;
       const payload = await response.json();
       const verified = payload.verifiedCounts || payload.counts || payload;
@@ -128,13 +129,13 @@ function VoteQuestPage() {
         },
       });
     } catch {
-      // Keep the last known public counters if the server API is temporarily unreachable.
+      // Keep the last known public counters if the Supabase Edge Function is temporarily unreachable.
     }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/pix/config', { cache: 'no-store' })
+    apiFetch('/api/pix/config', { cache: 'no-store' })
       .then((response) => response.ok ? response.json() : null)
       .then((config) => {
         if (cancelled) return;
@@ -145,7 +146,7 @@ function VoteQuestPage() {
       .catch(() => { if (!cancelled) setPixConfig(FALLBACK_PIX_CONFIG); })
       .finally(() => { if (!cancelled) setPixConfigLoaded(true); });
 
-    fetch('/api/health', { cache: 'no-store' })
+    apiFetch('/api/health', { cache: 'no-store' })
       .then((response) => response.ok ? response.json() : null)
       .then((health) => {
         if (!cancelled) setBackendStatus({
@@ -231,13 +232,13 @@ function VoteQuestPage() {
     event.preventDefault();
     if (!selectedChoice || !reviewConsent || submittingVote) return;
     if (!backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured) {
-      setSubmissionError('A API Vercel, o banco Supabase e o token administrativo precisam estar configurados antes de enviar votos.');
+      setSubmissionError('A Edge Function do Supabase, o banco e o token administrativo precisam estar configurados antes de enviar votos.');
       return;
     }
     setSubmittingVote(true);
     setSubmissionError('');
     try {
-      const response = await fetch('/api/votes/submit', {
+      const response = await apiFetch('/api/votes/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ candidate: selectedChoice.id, endToEndId: endToEndId.trim() }),
@@ -245,19 +246,19 @@ function VoteQuestPage() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         const serverMessage = response.status === 404
-          ? 'A API de revisão não está publicada neste hosting. O QR pode ser exibido, mas o envio do voto exige o servidor VoteQuest ativo.'
+          ? 'A Edge Function votequest-api não está publicada no Supabase. O QR pode aparecer, mas o envio do voto exige essa função.'
           : body.message || 'Não foi possível enviar o pedido.';
         throw new Error(serverMessage);
       }
       if (body.status !== 'pending' || typeof body.protocol !== 'string' || !body.protocol) {
-        throw new Error('A resposta da API de revisão é inválida. Confirme se o backend Node do VoteQuest está publicado.');
+        throw new Error('A resposta da API de revisão é inválida. Confirme se a Edge Function votequest-api está publicada no Supabase.');
       }
       setVoteProtocol(body.protocol);
       setVoteStatus('pending');
       setModalStep('submitted');
     } catch (error) {
       setSubmissionError(error instanceof TypeError
-        ? 'Servidor de revisão indisponível. Ative/deploy o backend Node do VoteQuest; variáveis de ambiente sozinhas não criam a API.'
+        ? 'Edge Function votequest-api indisponível. Publique a função no Supabase e confirme sua URL e chave anon públicas.'
         : error.message || 'Não foi possível enviar para revisão. Tente novamente.');
     } finally {
       setSubmittingVote(false);
@@ -267,7 +268,7 @@ function VoteQuestPage() {
   const checkVoteStatus = async () => {
     if (!voteProtocol) return;
     try {
-      const response = await fetch(`/api/votes/status/${encodeURIComponent(voteProtocol)}`, { cache: 'no-store' });
+      const response = await apiFetch(`/api/votes/status/${encodeURIComponent(voteProtocol)}`, { cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !['pending', 'approved', 'rejected'].includes(body.status)) {
         throw new Error(body.message || 'A API de revisão não retornou um status válido.');
@@ -276,7 +277,7 @@ function VoteQuestPage() {
       if (body.status === 'approved') await refreshVoteStats();
     } catch (error) {
       setSubmissionError(error instanceof TypeError
-        ? 'Servidor de revisão indisponível neste endereço.'
+        ? 'Edge Function votequest-api indisponível; confira a conexão com o Supabase.'
         : error.message || 'Não foi possível consultar agora.');
     }
   };
@@ -480,14 +481,14 @@ function VoteQuestPage() {
                         {!backendStatus.checked
                           ? 'Verificando API e banco de dados…'
                           : !backendStatus.available
-                            ? 'API Vercel indisponível neste domínio. Confirme que as funções /api foram publicadas.'
+                            ? 'Edge Function votequest-api do Supabase não respondeu. Publique a função e confira a URL/chave anon do projeto.'
                             : !backendStatus.databaseReady
-                              ? 'API Vercel ativa, mas o Supabase ainda não está configurado ou a migration não foi aplicada. Não pague até concluir a configuração.'
+                              ? 'A Edge Function respondeu, mas o banco ainda não está inicializado ou a migration não foi aplicada. Não pague até concluir a configuração.'
                               : !backendStatus.adminConfigured
-                                ? 'Banco conectado, mas falta VOTEQUEST_ADMIN_TOKEN no Vercel. A revisão está desativada; não pague ainda.'
+                                ? 'Banco conectado, mas falta VOTEQUEST_ADMIN_TOKEN nos secrets das Edge Functions do Supabase. Não pague ainda.'
                                 : !backendStatus.pixReady
-                                  ? 'VOTEQUEST_PIX_CODE inválido no servidor. Está sendo mostrado o QR oficial de contingência; confira recebedor e valor antes de pagar.'
-                                  : 'API Vercel e Supabase ativos. O E2E ID será conferido manualmente.'}
+                                  ? 'VOTEQUEST_PIX_CODE inválido nas secrets do Supabase. Está sendo mostrado o QR oficial de contingência; confira recebedor e valor antes de pagar.'
+                                  : 'Edge Function e banco Supabase ativos. O E2E ID será conferido manualmente.'}
                       </div>
                       <button
                         className="verify-button"
@@ -496,7 +497,7 @@ function VoteQuestPage() {
                         onClick={() => { setModalStep('review'); setSubmissionError(''); }}
                       >
                         {!backendStatus.checked ? 'Verificando servidor…'
-                          : !backendStatus.available ? 'API Vercel indisponível'
+                          : !backendStatus.available ? 'API Supabase indisponível'
                             : !backendStatus.databaseReady ? 'Banco Supabase não configurado'
                               : !backendStatus.adminConfigured ? 'Revisão não configurada'
                                 : 'Já fiz o Pix — enviar para conferência'}
@@ -511,7 +512,7 @@ function VoteQuestPage() {
                           ? 'Verificando se há um QR estático configurado.'
                           : pixConfig.issue === 'invalid'
                             ? 'O código configurado não passou nas validações de valor, tipo estático ou CRC. Confira o copia e cola antes de publicar.'
-                            : 'Configure o código Pix copia e cola de R$ 10,00 no servidor para habilitar o pagamento.'}</p>
+                            : 'Configure VOTEQUEST_PIX_CODE nas secrets da Edge Function do Supabase para habilitar o pagamento.'}</p>
                       </div>
                     </div>
                   )}
@@ -546,10 +547,10 @@ function AdminReviewPage() {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch('/api/admin/votes', { headers: { 'x-admin-token': token }, cache: 'no-store' });
+      const response = await apiFetch('/api/admin/votes', { headers: { 'x-admin-token': token }, cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
       if (!response.ok || !Array.isArray(body.pending) || typeof body.demoMode !== 'boolean') {
-        throw new Error(body.message || 'A API administrativa não respondeu corretamente; confirme se o backend Node está publicado.');
+        throw new Error(body.message || 'A API administrativa do Supabase não respondeu corretamente; confirme a Edge Function e a migration.');
       }
       setAdminToken(token);
       setPending(Array.isArray(body.pending) ? body.pending : []);
@@ -568,7 +569,7 @@ function AdminReviewPage() {
     setBusyProtocol(protocol);
     setError('');
     try {
-      const response = await fetch(`/api/admin/votes/${encodeURIComponent(protocol)}`, {
+      const response = await apiFetch(`/api/admin/votes/${encodeURIComponent(protocol)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
         body: JSON.stringify({ decision }),
@@ -590,7 +591,7 @@ function AdminReviewPage() {
     setSavingSettings(true);
     setError('');
     try {
-      const response = await fetch('/api/admin/settings', {
+      const response = await apiFetch('/api/admin/settings', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
         body: JSON.stringify({ demoMode: nextDemoMode }),
@@ -613,7 +614,7 @@ function AdminReviewPage() {
     setManualFeedback('');
     setError('');
     try {
-      const response = await fetch('/api/admin/manual-votes', {
+      const response = await apiFetch('/api/admin/manual-votes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
         body: JSON.stringify({
