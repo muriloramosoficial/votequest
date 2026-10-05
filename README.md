@@ -1,5 +1,5 @@
 # VoteQuest
-
+.
 Protótipo React de uma página dividida entre PT · Lula e PL · Flávio. No mobile, o split vira um deck em tela cheia com abas e navegação por swipe. O placar principal é **demonstrativo**: 700.000 votos simulados, com percentuais ilustrativos de 62% e 38%; não são resultados reais. Abaixo dele, os votos reais só aparecem após aprovação manual do Pix.
 
 ## Rodar localmente
