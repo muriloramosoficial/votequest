@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { apiFetch } from './lib/api.js';
-import { DEFAULT_PIX_CONFIG } from '../supabase/functions/_shared/pix-config.js';
 
 const choices = [
   {
@@ -23,6 +22,8 @@ const choices = [
 ];
 
 const numberFormat = new Intl.NumberFormat('pt-BR');
+const emptyVoteStats = { verifiedCounts: { lula: 0, flavio: 0 } };
+const knownVoteStatuses = ['pending', 'review', 'approved', 'rejected', 'expired'];
 
 function Icon({ name, size = 18, className = '' }) {
   const common = {
@@ -64,9 +65,31 @@ function BrandMark() {
   );
 }
 
-const FALLBACK_PIX_CONFIG = DEFAULT_PIX_CONFIG;
-const emptyPixConfig = { ready: false, pixCode: '', receiverName: '', city: '', issue: 'missing' };
-const emptyVoteStats = { verifiedCounts: { lula: 0, flavio: 0 } };
+function formatAmount(amount) {
+  const value = Number(amount);
+  if (!Number.isFinite(value)) return 'R$ 10,00';
+  return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function formatCountdown(seconds) {
+  const safe = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${String(Math.floor(safe / 60)).padStart(2, '0')}:${String(safe % 60).padStart(2, '0')}`;
+}
+
+function formatMoment(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString('pt-BR');
+}
+
+function voteStatusMessage(status, choiceName) {
+  if (status === 'approved') return `Pagamento aprovado — voto em ${choiceName} validado.`;
+  if (status === 'rejected') return 'Pedido não aprovado. O código não foi localizado liquidado no prazo.';
+  if (status === 'expired') return 'Este pedido passou do prazo de conferência. Se você pagou, fale com a equipe.';
+  if (status === 'review') return 'Na fila: aguardando conferência do pagamento no extrato.';
+  return 'Pix gerado. Pague e toque em “Já fiz o Pix”.';
+}
 
 export default function App() {
   if (typeof window !== 'undefined' && window.location.pathname === '/admin') {
@@ -80,20 +103,20 @@ function VoteQuestPage() {
   const [mobileChoiceIndex, setMobileChoiceIndex] = useState(0);
   const [isMobileLayout, setIsMobileLayout] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const touchStart = useRef(null);
-  const [pixConfig, setPixConfig] = useState(FALLBACK_PIX_CONFIG);
-  const [pixConfigLoaded, setPixConfigLoaded] = useState(false);
-  const pixCode = pixConfig.pixCode;
   const [backendStatus, setBackendStatus] = useState({ checked: false, available: false, databaseReady: false, adminConfigured: false, pixReady: false });
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState('');
   const [voteStats, setVoteStats] = useState(emptyVoteStats);
-  const [modalStep, setModalStep] = useState('pix');
-  const [endToEndId, setEndToEndId] = useState('');
+  const [modalStep, setModalStep] = useState('howto');
+  const [intent, setIntent] = useState(null);
+  const [intentLoading, setIntentLoading] = useState(false);
+  const [intentError, setIntentError] = useState('');
   const [reviewConsent, setReviewConsent] = useState(false);
-  const [submittingVote, setSubmittingVote] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [submissionError, setSubmissionError] = useState('');
   const [voteProtocol, setVoteProtocol] = useState('');
   const [voteStatus, setVoteStatus] = useState('');
+  const [remainingSeconds, setRemainingSeconds] = useState(0);
 
   const selectedChoice = useMemo(
     () => choices.find((choice) => choice.id === selected) || null,
@@ -126,21 +149,11 @@ function VoteQuestPage() {
 
   useEffect(() => {
     let cancelled = false;
-    apiFetch('/api/pix/config', { cache: 'no-store' })
-      .then((response) => response.ok ? response.json() : null)
-      .then((config) => {
-        if (cancelled) return;
-        if (config?.ready) setPixConfig(config);
-        else if (config?.issue === 'invalid') setPixConfig({ ...FALLBACK_PIX_CONFIG, issue: 'invalid-env' });
-        else setPixConfig(FALLBACK_PIX_CONFIG);
-      })
-      .catch(() => { if (!cancelled) setPixConfig(FALLBACK_PIX_CONFIG); })
-      .finally(() => { if (!cancelled) setPixConfigLoaded(true); });
-
     apiFetch('/api/health', { cache: 'no-store' })
       .then((response) => response.ok ? response.json() : null)
       .then((health) => {
-        if (!cancelled) setBackendStatus({
+        if (cancelled) return;
+        setBackendStatus({
           checked: true,
           available: Boolean(health?.api ?? health?.ok),
           databaseReady: Boolean(health?.databaseReady ?? health?.ok),
@@ -182,16 +195,70 @@ function VoteQuestPage() {
     };
   }, [selectedChoice]);
 
+  // Each vote gets its own Pix payload with a unique reference code, so a stale QR is never shown.
+  const mintIntent = useCallback(async (candidateId) => {
+    setIntentLoading(true);
+    setIntentError('');
+    setIntent(null);
+    try {
+      const response = await apiFetch('/api/votes/intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate: candidateId }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(response.status === 404
+          ? 'A Edge Function votequest-api não está publicada no Supabase. Não é possível gerar o Pix.'
+          : body.message || 'Não foi possível gerar o Pix deste voto.');
+      }
+      if (typeof body.protocol !== 'string' || !body.protocol
+        || typeof body.referenceCode !== 'string' || !body.referenceCode
+        || typeof body.pixCode !== 'string' || !body.pixCode) {
+        throw new Error('A resposta da API é inválida. Confirme se a Edge Function votequest-api está publicada no Supabase.');
+      }
+      setIntent(body);
+      setVoteProtocol(body.protocol);
+      setVoteStatus(body.status);
+      return body;
+    } catch (error) {
+      setIntentError(error instanceof TypeError
+        ? 'Edge Function votequest-api indisponível. Não pague antes do QR aparecer.'
+        : error.message || 'Não foi possível gerar o Pix deste voto.');
+      return null;
+    } finally {
+      setIntentLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!intent?.expiresAt) return undefined;
+    const tick = () => {
+      setRemainingSeconds(Math.max(0, Math.ceil((new Date(intent.expiresAt).getTime() - Date.now()) / 1000)));
+    };
+    tick();
+    const interval = window.setInterval(tick, 1000);
+    return () => window.clearInterval(interval);
+  }, [intent?.expiresAt]);
+
   const openModal = (choice) => {
     setSelected(choice.id);
     setCopied(false);
     setCopyError('');
-    setModalStep('pix');
-    setEndToEndId('');
+    setModalStep('howto');
     setReviewConsent(false);
     setSubmissionError('');
     setVoteProtocol('');
     setVoteStatus('');
+    setRemainingSeconds(0);
+  };
+
+  // The Pix is only minted once the voter has read how the reference code works, so opening and
+  // abandoning the dialog never leaves a pending request in the database.
+  const advanceToPix = async () => {
+    if (!selectedChoice) return;
+    setModalStep('pix');
+    if (!intent) await mintIntent(selectedChoice.id);
   };
 
   function closeModal() {
@@ -219,40 +286,28 @@ function VoteQuestPage() {
     selectMobileChoice(mobileChoiceIndex + (deltaX < 0 ? 1 : -1));
   };
 
-  const submitVoteForReview = async (event) => {
-    event.preventDefault();
-    if (!selectedChoice || !reviewConsent || submittingVote) return;
-    if (!backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured) {
-      setSubmissionError('A Edge Function do Supabase, o banco e o token administrativo precisam estar configurados antes de enviar votos.');
-      return;
-    }
-    setSubmittingVote(true);
+  const confirmPayment = async () => {
+    if (!voteProtocol || confirming) return;
+    setConfirming(true);
     setSubmissionError('');
     try {
-      const response = await apiFetch('/api/votes/submit', {
+      const response = await apiFetch('/api/votes/intent/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate: selectedChoice.id, endToEndId: endToEndId.trim() }),
+        body: JSON.stringify({ protocol: voteProtocol }),
       });
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
-        const serverMessage = response.status === 404
-          ? 'A Edge Function votequest-api não está publicada no Supabase. O QR pode aparecer, mas o envio do voto exige essa função.'
-          : body.message || 'Não foi possível enviar o pedido.';
-        throw new Error(serverMessage);
+        throw new Error(body.message || 'Não foi possível enviar o pedido para conferência.');
       }
-      if (body.status !== 'pending' || typeof body.protocol !== 'string' || !body.protocol) {
-        throw new Error('A resposta da API de revisão é inválida. Confirme se a Edge Function votequest-api está publicada no Supabase.');
-      }
-      setVoteProtocol(body.protocol);
-      setVoteStatus('pending');
+      setVoteStatus(body.status);
       setModalStep('submitted');
     } catch (error) {
       setSubmissionError(error instanceof TypeError
-        ? 'Edge Function votequest-api indisponível. Publique a função no Supabase e confirme sua URL e chave anon públicas.'
+        ? 'Edge Function votequest-api indisponível; confira a conexão com o Supabase.'
         : error.message || 'Não foi possível enviar para revisão. Tente novamente.');
     } finally {
-      setSubmittingVote(false);
+      setConfirming(false);
     }
   };
 
@@ -261,7 +316,7 @@ function VoteQuestPage() {
     try {
       const response = await apiFetch(`/api/votes/status/${encodeURIComponent(voteProtocol)}`, { cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok || !['pending', 'approved', 'rejected'].includes(body.status)) {
+      if (!response.ok || !knownVoteStatuses.includes(body.status)) {
         throw new Error(body.message || 'A API de revisão não retornou um status válido.');
       }
       setVoteStatus(body.status);
@@ -274,15 +329,18 @@ function VoteQuestPage() {
   };
 
   const copyPixCode = async () => {
-    if (!pixCode) return;
+    if (!intent?.pixCode) return;
     try {
-      await navigator.clipboard.writeText(pixCode);
+      await navigator.clipboard.writeText(intent.pixCode);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     } catch {
       setCopyError('Não foi possível copiar automaticamente. Selecione e copie o código Pix.');
     }
   };
+
+  const amountLabel = formatAmount(intent?.amount);
+  const expired = Boolean(intent) && remainingSeconds === 0;
 
   return (
     <div className="votequest-app">
@@ -371,7 +429,7 @@ function VoteQuestPage() {
         <div className="mobile-swipe-hint" aria-hidden="true"><span>↔</span> Deslize para alternar</div>
 
         <footer className="site-footer">
-          CONTAGEM REAL: apenas pagamentos Pix de R$ 10,00 aprovados pela conferência manual entram no placar.
+          CONTAGEM REAL: cada voto gera um Pix com código próprio; só entra no placar o Pix de R$ 10,00 localizado no extrato.
         </footer>
       </main>
 
@@ -391,15 +449,14 @@ function VoteQuestPage() {
             <div className="static-pix-step">
               {modalStep === 'submitted' ? (
                 <div className="review-submitted">
-                  <span className="modal-eyebrow">PROTOCOLO DE REVISÃO</span>
-                  <h2 id="checkout-title">Pedido enviado.</h2>
-                  <p className="modal-subtitle">A equipe precisa conferir manualmente o E2E ID no extrato Pix. O voto só entra na contagem real após aprovação.</p>
-                  <div className="protocol-card"><span>SEU PROTOCOLO</span><code>{voteProtocol}</code></div>
+                  <span className="modal-eyebrow">PEDIDO ENVIADO</span>
+                  <h2 id="checkout-title">Na fila de conferência.</h2>
+                  <p className="modal-subtitle">A equipe busca o código abaixo no extrato Pix. O voto só entra na contagem real após aprovação.</p>
+                  <div className="protocol-card"><span>CÓDIGO DE REFERÊNCIA</span><code>{intent?.referenceCode}</code></div>
+                  <div className="protocol-mini"><span>PROTOCOLO</span><code>{voteProtocol}</code></div>
                   <div className={`review-status review-status--${voteStatus || 'pending'}`}>
                     <span className="review-status__dot" />
-                    {voteStatus === 'approved' ? `Pagamento aprovado — voto em ${selectedChoice.name} validado.`
-                      : voteStatus === 'rejected' ? 'Pedido não aprovado. Confira o E2E ID com seu comprovante.'
-                        : 'Aguardando conferência do pagamento.'}
+                    {voteStatusMessage(voteStatus, selectedChoice.name)}
                   </div>
                   {submissionError && <p className="inline-error" role="status">{submissionError}</p>}
                   <button className="verify-button" type="button" onClick={checkVoteStatus}>Consultar situação</button>
@@ -407,100 +464,148 @@ function VoteQuestPage() {
                 </div>
               ) : modalStep === 'review' ? (
                 <div className="pix-review-step">
-                  <span className="modal-eyebrow">CONFERÊNCIA MANUAL · R$ 10,00</span>
-                  <h2 id="checkout-title">Informe o E2E ID.</h2>
-                  <p className="modal-subtitle">Encontre o identificador End-to-End no comprovante do seu banco. Não envie CPF nem imagem do comprovante.</p>
-                  <form className="review-form" onSubmit={submitVoteForReview}>
-                    <label className="field field--wide">
-                      <span>Identificador E2E da transação Pix</span>
-                      <input
-                        type="text"
-                        name="endToEndId"
-                        required
-                        minLength={16}
-                        maxLength={100}
-                        autoComplete="off"
-                        autoCapitalize="characters"
-                        spellCheck="false"
-                        value={endToEndId}
-                        onChange={(event) => setEndToEndId(event.target.value.replace(/\s/g, '').toUpperCase())}
-                        placeholder="Ex.: E123… (conforme seu comprovante)"
-                      />
-                    </label>
-                    <label className="consent-field">
-                      <input type="checkbox" required checked={reviewConsent} onChange={(event) => setReviewConsent(event.target.checked)} />
-                      <span>Autorizo a conferência temporária deste identificador junto à minha opção. Após a decisão, o E2E ID e a opção saem da fila; apenas totais agregados são mantidos.</span>
-                    </label>
-                    {submissionError && <p className="inline-error form-error" role="alert">{submissionError}</p>}
-                    <button className="modal-primary" type="submit" disabled={!reviewConsent || submittingVote || !backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured}>
-                      {submittingVote ? <><span className="mini-spinner mini-spinner--light" /> Enviando…</> : 'Enviar para conferência'}
-                    </button>
-                  </form>
+                  <span className="modal-eyebrow">CONFERÊNCIA MANUAL · {amountLabel}</span>
+                  <h2 id="checkout-title">Avise que já pagou.</h2>
+                  <p className="modal-subtitle">Nada para digitar. A equipe procura o código <strong>{intent?.referenceCode}</strong> no extrato e confere o valor de {amountLabel}.</p>
+                  <label className="consent-field">
+                    <input type="checkbox" checked={reviewConsent} onChange={(event) => setReviewConsent(event.target.checked)} />
+                    <span>Autorizo a conferência deste código de referência junto à minha opção. Após a decisão, a opção sai da fila e o pedido expira sozinho; permanecem apenas os totais agregados.</span>
+                  </label>
+                  {submissionError && <p className="inline-error form-error" role="alert">{submissionError}</p>}
+                  <button className="modal-primary" type="button" onClick={confirmPayment} disabled={!reviewConsent || confirming || expired}>
+                    {confirming ? <><span className="mini-spinner mini-spinner--light" /> Enviando…</> : 'Enviar para conferência'}
+                  </button>
                   <button className="verify-button" type="button" onClick={() => { setModalStep('pix'); setSubmissionError(''); }}>Voltar ao QR Pix</button>
+                </div>
+              ) : modalStep === 'howto' ? (
+                <div className="howto-step">
+                  <span className="modal-eyebrow">ANTES DE PAGAR · LEIA ESTE PASSO</span>
+                  <h2 id="checkout-title">Como votar</h2>
+                  <p className="modal-subtitle">Todo voto é conferido por um código de referência. Entenda o processo antes de pagar {amountLabel}.</p>
+
+                  <ol className="howto-steps">
+                    <li className="howto-item">
+                      <span className="howto-item__index">1</span>
+                      <div>
+                        <strong>O Pix é gerado só para você</strong>
+                        <p>Ao continuar, criamos um Pix exclusivo para o seu voto em {selectedChoice.name}, com um <strong>código de referência de 8 caracteres</strong>. Ninguém mais recebe esse mesmo código nem o mesmo QR.</p>
+                      </div>
+                    </li>
+                    <li className="howto-item">
+                      <span className="howto-item__index">2</span>
+                      <div>
+                        <strong>Você paga no seu banco</strong>
+                        <p>Aponte a câmera ou copie o código. Confira o recebedor no aplicativo do banco antes de confirmar. O código de referência aparece no comprovante como “identificador”.</p>
+                      </div>
+                    </li>
+                    <li className="howto-item">
+                      <span className="howto-item__index">3</span>
+                      <div>
+                        <strong>Avise que já pagou</strong>
+                        <p>Depois do Pix, toque em <strong>“Já fiz o Pix”</strong>. Você não digita nada. A equipe procura o pagamento pelo código no extrato e só então o voto entra na contagem.</p>
+                      </div>
+                    </li>
+                  </ol>
+
+                  <div className="howto-why">
+                    <strong>Por que o código é necessário</strong>
+                    <p>O banco só informa o valor recebido, não o nome nem a escolha de quem pagou. O código de referência é o único jeito de ligar o Pix recebido ao seu voto — sem ele, a equipe não consegue localizar o pagamento e o voto não pode ser validado.</p>
+                  </div>
+
+                  <p className="howto-notes">
+                    O pedido vale por 1 hora. Não pedimos CPF, documentos, endereço nem foto do comprovante.
+                  </p>
+
+                  <button className="modal-primary" type="button" onClick={advanceToPix}>
+                    Entendi — gerar meu Pix de {amountLabel}
+                  </button>
+                  <button className="verify-button" type="button" onClick={closeModal}>Agora não</button>
                 </div>
               ) : (
                 <>
-                  <span className="modal-eyebrow">PARTICIPAÇÃO · R$ 10,00</span>
+                  <span className="modal-eyebrow">PARTICIPAÇÃO · {amountLabel}</span>
                   <h2 id="checkout-title">Sua escolha: {selectedChoice.name}.</h2>
-                  <p className="modal-subtitle">O Pix é estático. Confira o recebedor no seu banco antes de pagar.</p>
+                  <p className="modal-subtitle">Este Pix é gerado só para o seu voto e carrega um código de referência próprio. Confira o recebedor no seu banco antes de pagar.</p>
 
-                  {pixCode ? (
+                  {intent ? (
                     <>
                       <div className="qr-frame">
-                        <QRCodeSVG value={pixCode} size={190} level="M" includeMargin />
+                        <QRCodeSVG value={intent.pixCode} size={190} level="M" includeMargin />
                       </div>
+
+                      <div className="pix-reference-card">
+                        <span>CÓDIGO DE REFERÊNCIA DESTE VOTO</span>
+                        <strong>{intent.referenceCode}</strong>
+                        <small>Aparece como “identificador” no seu comprovante Pix.</small>
+                      </div>
+
                       <div className="pix-receiver">
                         <span>RECEBEDOR INFORMADO NO PIX</span>
-                        <strong>{pixConfig.receiverName}</strong>
-                        <small>{pixConfig.city}</small>
+                        <strong>{intent.receiverName}</strong>
+                        <small>{intent.city}</small>
                       </div>
-                      <div className="pix-code-heading"><span>PIX COPIA E COLA</span><span className="pix-expiry">Valor da doação: R$ 10,00</span></div>
-                      <div className="pix-code-box"><code>{pixCode}</code></div>
+
+                      <div className="pix-code-heading">
+                        <span>PIX COPIA E COLA</span>
+                        <span className={`pix-expiry ${expired ? 'pix-expiry--expired' : ''}`}>
+                          {expired ? 'Pix expirado' : `Expira em ${formatCountdown(remainingSeconds)}`}
+                        </span>
+                      </div>
+                      <div className="pix-code-box"><code>{intent.pixCode}</code></div>
                       <button className={`copy-button ${copied ? 'copy-button--copied' : ''}`} type="button" onClick={copyPixCode}>
                         <Icon name={copied ? 'check' : 'copy'} size={16} /> {copied ? 'Código copiado' : 'Copiar código Pix'}
                       </button>
                       {copyError && <p className="inline-error" role="status">{copyError}</p>}
+
                       <div className="static-pix-notice">
                         <strong>Como o pagamento é validado?</strong>
-                        <p>Depois do Pix, informe o E2E ID do comprovante. A equipe confere o valor de R$ 10,00 no extrato e aprova ou rejeita manualmente. Nenhum CPF é solicitado ou enviado ao Telegram.</p>
+                        <p>Depois do Pix, toque em “Já fiz o Pix”. A equipe localiza o pagamento pelo código <strong>{intent.referenceCode}</strong> no extrato e confere o valor de {amountLabel}. Não coletamos CPF, documentos nem imagens do comprovante.</p>
                       </div>
+
                       <div className={`backend-status-note ${backendStatus.available && backendStatus.databaseReady && backendStatus.adminConfigured && backendStatus.pixReady ? 'backend-status-note--ready' : 'backend-status-note--warning'}`} role="status">
                         {!backendStatus.checked
                           ? 'Verificando API e banco de dados…'
                           : !backendStatus.available
-                            ? 'Edge Function votequest-api do Supabase não respondeu. Publique a função e confira a URL/chave anon do projeto.'
+                            ? 'Edge Function votequest-api do Supabase não respondeu.'
                             : !backendStatus.databaseReady
                               ? 'A Edge Function respondeu, mas o banco ainda não está inicializado ou a migration não foi aplicada. Não pague até concluir a configuração.'
                               : !backendStatus.adminConfigured
                                 ? 'Banco conectado, mas falta VOTEQUEST_ADMIN_TOKEN nos secrets das Edge Functions do Supabase. Não pague ainda.'
                                 : !backendStatus.pixReady
-                                  ? 'VOTEQUEST_PIX_CODE inválido nas secrets do Supabase. Está sendo mostrado o QR oficial de contingência; confira recebedor e valor antes de pagar.'
-                                  : 'Edge Function e banco Supabase ativos. O E2E ID será conferido manualmente.'}
+                                  ? 'VOTEQUEST_PIX_CODE inválido nas secrets do Supabase. Confira recebedor e valor antes de pagar.'
+                                  : 'Edge Function e banco Supabase ativos. A conferência é manual.'}
                       </div>
-                      <button
-                        className="verify-button"
-                        type="button"
-                        disabled={!backendStatus.checked || !backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured}
-                        onClick={() => { setModalStep('review'); setSubmissionError(''); }}
-                      >
-                        {!backendStatus.checked ? 'Verificando servidor…'
-                          : !backendStatus.available ? 'API Supabase indisponível'
-                            : !backendStatus.databaseReady ? 'Banco Supabase não configurado'
-                              : !backendStatus.adminConfigured ? 'Revisão não configurada'
-                                : 'Já fiz o Pix — enviar para conferência'}
-                      </button>
+
+                      <div className="pix-step-actions">
+                        <button
+                          className="verify-button verify-button--ghost"
+                          type="button"
+                          onClick={() => setModalStep('howto')}
+                        >
+                          Como votar
+                        </button>
+                        <button
+                          className="verify-button"
+                          type="button"
+                          disabled={expired}
+                          onClick={() => { setModalStep('review'); setSubmissionError(''); }}
+                        >
+                          {expired ? 'Prazo encerrado' : 'Já fiz o Pix'}
+                        </button>
+                      </div>
                     </>
                   ) : (
                     <div className="setup-callout" role="status">
                       <span className="setup-callout__icon"><Icon name="pix" size={18} /></span>
                       <div>
-                        <strong>{!pixConfigLoaded ? 'Carregando configuração Pix…' : pixConfig.issue === 'invalid' ? 'QR Pix não validado' : 'Aguardando novo QR Pix'}</strong>
-                        <p>{!pixConfigLoaded
-                          ? 'Verificando se há um QR estático configurado.'
-                          : pixConfig.issue === 'invalid'
-                            ? 'O código configurado não passou nas validações de valor, tipo estático ou CRC. Confira o copia e cola antes de publicar.'
-                            : 'Configure VOTEQUEST_PIX_CODE nas secrets da Edge Function do Supabase para habilitar o pagamento.'}</p>
+                        <strong>{intentLoading ? 'Gerando seu Pix…' : 'Não foi possível gerar o Pix'}</strong>
+                        <p>{intentLoading
+                          ? 'Cada voto recebe um QR Pix próprio, com código de referência e validade de uma hora.'
+                          : intentError}</p>
                       </div>
+                      {!intentLoading && selectedChoice && (
+                        <button className="verify-button setup-callout__retry" type="button" onClick={() => mintIntent(selectedChoice.id)}>Tentar de novo</button>
+                      )}
                     </div>
                   )}
                   <p className="privacy-note">Enquete independente; o placar não é um resultado eleitoral oficial.</p>
@@ -588,7 +693,7 @@ function AdminReviewPage() {
         <div className="admin-heading">
           <span className="admin-eyebrow">ÁREA RESTRITA</span>
           <h1>Revisão de pagamentos Pix</h1>
-          <p>Confira o E2E ID no extrato da conta. Aprove somente transferências recebidas de R$ 10,00.</p>
+          <p>Busque o código de referência no extrato. Aprove somente Pix liquidados de R$ 10,00 anteriores ao prazo do pedido.</p>
         </div>
 
         <section className="admin-card">
@@ -635,16 +740,31 @@ function AdminReviewPage() {
                 <div className="admin-queue">
                   {pending.map((item) => {
                     const choice = choices.find((candidate) => candidate.id === item.candidate);
+                    const awaitingReview = item.status === 'review';
                     return (
                       <article className="admin-request" key={item.protocol}>
                         <div className="admin-request__top">
                           <span className={`admin-option admin-option--${choice?.tone || 'red'}`}>
                             {choice?.party || item.candidate} · {choice?.name || 'Opção'}
                           </span>
-                          <time dateTime={item.createdAt}>{new Date(item.createdAt).toLocaleString('pt-BR')}</time>
+                          <span className={`admin-await ${awaitingReview ? 'admin-await--ready' : ''}`}>
+                            {awaitingReview ? 'Aguardando conferência' : 'QR gerado, pagador ainda não confirmou'}
+                          </span>
                         </div>
-                        <div className="admin-reference"><span>PROTOCOLO {item.protocol}</span><code>{item.endToEndId}</code></div>
-                        <p>Confira no extrato: valor R$ 10,00, recebedor e status liquidado.</p>
+
+                        <div className="admin-reference">
+                          <span>CÓDIGO DE REFERÊNCIA (TxID NO PIX)</span>
+                          <code>{item.referenceCode}</code>
+                        </div>
+
+                        <dl className="admin-timeline">
+                          <div><dt>Pedido criado</dt><dd>{formatMoment(item.requestedAt)}</dd></div>
+                          <div><dt>“Já fiz o Pix”</dt><dd>{formatMoment(item.confirmedAt)}</dd></div>
+                          <div><dt>Expira em</dt><dd>{formatMoment(item.expiresAt)}</dd></div>
+                        </dl>
+
+                        <p>No extrato, busque pelo código <strong>{item.referenceCode}</strong>: valor R$ 10,00, recebedor e status liquidado.</p>
+
                         <div className="admin-actions">
                           <button type="button" className="admin-reject" onClick={() => decideVote(item.protocol, 'reject')} disabled={busyProtocol === item.protocol}>Rejeitar</button>
                           <button type="button" className="admin-approve" onClick={() => decideVote(item.protocol, 'approve')} disabled={busyProtocol === item.protocol}>
@@ -659,7 +779,7 @@ function AdminReviewPage() {
             </>
           )}
         </section>
-        <p className="admin-data-note">A fila guarda temporariamente a opção e o E2E ID para conferência. Ao aprovar/rejeitar, esses dados são removidos; permanecem apenas o placar agregado, um hash antirreuso e o status do protocolo. O token fica somente na memória desta página.</p>
+        <p className="admin-data-note">Cada voto tem um código de referência aleatório, sem vínculo com CPF ou documento. A fila guarda a opção até a decisão e expira pedidos após uma hora; ao aprovar/rejeitar, a opção sai da fila e permanecem apenas o placar agregado, um hash antirreuso e o status do protocolo. O token fica somente na memória desta página.</p>
       </main>
     </div>
   );

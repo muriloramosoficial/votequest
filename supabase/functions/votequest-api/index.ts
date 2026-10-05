@@ -3,6 +3,14 @@ import { DEFAULT_PIX_CONFIG } from '../_shared/pix-config.js'
 const validCandidates = new Set(['lula', 'flavio'])
 const protocolPattern = /^[A-F0-9]{32}$/i
 
+// Reference codes go into the Pix TxID (field 62.05), so they stay short and are restricted to
+// characters every banking app renders well. 0/O and 1/I/L are left out because they are the
+// usual source of transcription mistakes when the admin reads the code back from a statement.
+const referencePattern = /^[23456789A-HJ-NP-Z]{8}$/
+const referenceAlphabet = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'
+const maxTxidLength = 25
+const defaultVoteWindowSeconds = 3600
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
@@ -11,6 +19,7 @@ const corsHeaders = {
 }
 
 type Env = Record<string, string | undefined>
+type PixField = { tag: string; value: string }
 
 function readEnv(env: Env, name: string): string {
   const fromContext = env[name]
@@ -117,8 +126,8 @@ function databaseFailure(operation: string, error: any): Response {
   })
 }
 
-function parsePixFields(payload: string): Record<string, string> | null {
-  const fields: Record<string, string> = {}
+function parsePixTlv(payload: string): PixField[] | null {
+  const fields: PixField[] = []
   let offset = 0
   while (offset + 4 <= payload.length) {
     const tag = payload.slice(offset, offset + 2)
@@ -126,23 +135,58 @@ function parsePixFields(payload: string): Record<string, string> | null {
     if (!/^\d{2}$/.test(tag) || !/^\d{2}$/.test(lengthText)) return null
     const end = offset + 4 + Number(lengthText)
     if (end > payload.length) return null
-    fields[tag] = payload.slice(offset + 4, end)
+    fields.push({ tag, value: payload.slice(offset + 4, end) })
     offset = end
     if (tag === '63') break
   }
   return offset === payload.length ? fields : null
 }
 
-function hasValidPixCrc(payload: string): boolean {
-  if (!/6304[0-9A-Fa-f]{4}$/.test(payload)) return false
+function parsePixFields(payload: string): Record<string, string> | null {
+  const fields = parsePixTlv(payload)
+  if (!fields) return null
+  const record: Record<string, string> = {}
+  for (const field of fields) record[field.tag] = field.value
+  return record
+}
+
+function pixCrc16(payload: string): string {
   let crc = 0xffff
-  for (const byte of new TextEncoder().encode(payload.slice(0, -4))) {
+  for (const byte of new TextEncoder().encode(payload)) {
     crc ^= byte << 8
     for (let bit = 0; bit < 8; bit += 1) {
       crc = crc & 0x8000 ? ((crc << 1) ^ 0x1021) & 0xffff : (crc << 1) & 0xffff
     }
   }
-  return crc.toString(16).padStart(4, '0').toUpperCase() === payload.slice(-4).toUpperCase()
+  return crc.toString(16).padStart(4, '0').toUpperCase()
+}
+
+function hasValidPixCrc(payload: string): boolean {
+  if (!/6304[0-9A-Fa-f]{4}$/.test(payload)) return false
+  return pixCrc16(payload.slice(0, -4)) === payload.slice(-4).toUpperCase()
+}
+
+function tlv(tag: string, value: string): string {
+  return `${tag}${String(value.length).padStart(2, '0')}${value}`
+}
+
+// Rebuilds the BR Code with a per-vote TxID in the additional data field, then recomputes the
+// CRC16. Everything else (key, receiver, city, amount) comes from the validated base payload, so
+// the payer always sees the same receiver and the same R$ 10,00 amount.
+function buildDynamicPixCode(basePixCode: string, txid: string): string | null {
+  if (!referencePattern.test(txid) || txid.length > maxTxidLength) return null
+  const fields = parsePixTlv(basePixCode)
+  if (!fields) return null
+
+  // 63 (checksum) is always the last field of a BR Code, so the rebuilt payload keeps every
+  // other field in its original order and re-appends the additional data before the checksum.
+  const kept = fields
+    .filter((field) => field.tag !== '62' && field.tag !== '63')
+    .map((field) => tlv(field.tag, field.value))
+
+  const prefix = `${kept.join('')}${tlv('62', tlv('05', txid))}6304`
+  const payload = `${prefix}${pixCrc16(prefix)}`
+  return hasValidPixCrc(payload) ? payload : null
 }
 
 function getPixConfig(env: Env) {
@@ -159,10 +203,32 @@ function getPixConfig(env: Env) {
   return {
     ready: valid,
     pixCode: valid ? pixCode : '',
+    amount: fields?.['54'] || '',
     receiverName: fields?.['59'] || '',
     city: fields?.['60'] || '',
     issue: valid ? '' : 'invalid',
   }
+}
+
+// Rejection sampling keeps the distribution uniform even though 256 is not a multiple of the
+// alphabet size. Collisions are impossible in practice and the unique index would reject them.
+function newReferenceCode(): string {
+  const limit = Math.floor(256 / referenceAlphabet.length) * referenceAlphabet.length
+  let code = ''
+  while (code.length < 8) {
+    for (const byte of crypto.getRandomValues(new Uint8Array(16))) {
+      if (byte >= limit) continue
+      code += referenceAlphabet[byte % referenceAlphabet.length]
+      if (code.length === 8) break
+    }
+  }
+  return code
+}
+
+function voteWindowSeconds(env: Env): number {
+  const minutes = Number(readEnv(env, 'VOTEQUEST_VOTE_WINDOW_MINUTES'))
+  if (!Number.isFinite(minutes) || minutes <= 0) return defaultVoteWindowSeconds
+  return Math.min(Math.max(Math.floor(minutes * 60), 300), 86400)
 }
 
 function normalizeResults(data: any) {
@@ -242,6 +308,7 @@ async function handleHealth(env: Env): Promise<Response> {
     api: true,
     adminConfigured: Boolean(readEnv(env, 'VOTEQUEST_ADMIN_TOKEN')),
     pixReady: pixConfig.ready,
+    voteWindowSeconds: voteWindowSeconds(env),
   }
   try {
     await readResults(env)
@@ -274,43 +341,88 @@ async function handleRequest(req: Request, env: Env): Promise<Response> {
     }
   }
 
-  if (method === 'POST' && route === '/api/votes/submit') {
+  // Mints the short reference code and the per-vote Pix payload. The voter never types a bank
+  // transaction id; they just scan this QR and pay.
+  if (method === 'POST' && route === '/api/votes/intent') {
+    const pixConfig = getPixConfig(env)
+    if (!pixConfig.ready) {
+      return json(503, { error: 'pix_not_configured', message: 'O Pix ainda não está configurado.' })
+    }
+
     const body = await bodyObject(req)
     const candidate = String(body.candidate || '').toLowerCase()
-    const endToEndId = String(body.endToEndId || '').replace(/\s/g, '').toUpperCase()
     if (!validCandidates.has(candidate)) {
       return json(400, { error: 'invalid_candidate', message: 'Selecione uma opção válida.' })
     }
-    if (endToEndId.length < 16 || endToEndId.length > 100 || !/^[A-Z0-9-]+$/.test(endToEndId)) {
-      return json(400, { error: 'invalid_e2e', message: 'Informe o identificador E2E exibido no comprovante Pix.' })
+
+    const expiresInSeconds = voteWindowSeconds(env)
+    const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString()
+
+    // Retrying only matters if a reference code ever collides, which the unique index prevents.
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const referenceCode = newReferenceCode()
+      const pixCode = buildDynamicPixCode(pixConfig.pixCode, referenceCode)
+      if (!pixCode) {
+        return json(500, { error: 'pix_payload_invalid', message: 'Não foi possível gerar o código Pix deste voto.' })
+      }
+
+      try {
+        const inserted = await rest(
+          env,
+          'votequest_payments?select=protocol,reference_code,status,expires_at',
+          {
+            method: 'POST',
+            headers: { Prefer: 'return=representation' },
+            body: JSON.stringify({
+              protocol: newProtocol(),
+              candidate,
+              reference_code: referenceCode,
+              payment_hash: await sha256(referenceCode),
+              expires_at: expiresAt,
+            }),
+          },
+        )
+        const record = Array.isArray(inserted) ? inserted[0] : inserted
+        if (!record?.protocol) throw new Error('Supabase did not return the created protocol.')
+        return json(201, {
+          protocol: record.protocol,
+          referenceCode,
+          status: record.status,
+          pixCode,
+          amount: pixConfig.amount,
+          receiverName: pixConfig.receiverName,
+          city: pixConfig.city,
+          expiresAt: record.expires_at,
+          expiresInSeconds,
+        })
+      } catch (error) {
+        if (error instanceof SupabaseRequestError && error.status === 409) continue
+        if (error instanceof SupabaseRequestError && error.status === 400) {
+          return json(400, { error: 'invalid_payment', message: error.message })
+        }
+        return databaseFailure('create vote intent', error)
+      }
     }
 
+    return json(503, { error: 'reference_conflict', message: 'Não foi possível gerar um código único agora. Tente novamente.' })
+  }
+
+  // The voter pressed "Já fiz o Pix". Stamping the confirmation time lets the admin compare it
+  // against the payment time in the statement.
+  if (method === 'POST' && route === '/api/votes/intent/confirm') {
+    const body = await bodyObject(req)
+    const protocol = String(body.protocol || '').toUpperCase()
+    if (!protocolPattern.test(protocol)) {
+      return json(400, { error: 'invalid_protocol', message: 'Protocolo inválido.' })
+    }
     try {
-      const inserted = await rest(
-        env,
-        'votequest_payments?select=protocol,status',
-        {
-          method: 'POST',
-          headers: { Prefer: 'return=representation' },
-          body: JSON.stringify({
-            protocol: newProtocol(),
-            candidate,
-            end_to_end_id: endToEndId,
-            payment_hash: await sha256(endToEndId),
-          }),
-        },
-      )
-      const record = Array.isArray(inserted) ? inserted[0] : inserted
-      if (!record?.protocol) throw new Error('Supabase did not return the created protocol.')
-      return json(201, { protocol: record.protocol, status: record.status })
+      const data = await rpc(env, 'votequest_confirm_payment', { p_protocol: protocol })
+      if (data?.status === 'not_found') {
+        return json(404, { error: 'not_found', message: 'Pedido não encontrado. Abra a votação novamente.' })
+      }
+      return json(200, { status: data?.status })
     } catch (error) {
-      if (error instanceof SupabaseRequestError && error.status === 409) {
-        return json(409, { error: 'duplicate_payment', message: 'Este identificador Pix já foi enviado para revisão.' })
-      }
-      if (error instanceof SupabaseRequestError && error.status === 400) {
-        return json(400, { error: 'invalid_payment', message: error.message })
-      }
-      return databaseFailure('submit payment for review', error)
+      return databaseFailure('confirm payment', error)
     }
   }
 
@@ -318,10 +430,10 @@ async function handleRequest(req: Request, env: Env): Promise<Response> {
     const protocol = segments[3].toUpperCase()
     if (!protocolPattern.test(protocol)) return json(400, { status: 'invalid_protocol', message: 'Protocolo inválido.' })
     try {
-      const rows = await rest(env, `votequest_payments?select=status&protocol=eq.${protocol}&limit=1`)
+      const rows = await rest(env, `votequest_payments?select=status,reference_code&protocol=eq.${protocol}&limit=1`)
       const record = Array.isArray(rows) ? rows[0] : null
       if (!record) return json(404, { status: 'not_found', message: 'Protocolo não encontrado.' })
-      return json(200, { status: record.status })
+      return json(200, { status: record.status, referenceCode: record.reference_code })
     } catch (error) {
       return databaseFailure('check payment status', error)
     }
@@ -331,16 +443,21 @@ async function handleRequest(req: Request, env: Env): Promise<Response> {
     const auth = authorized(env, req)
     if (!auth.ok) return auth.response
     try {
-      const [pending, results] = await Promise.all([
-        rest(env, 'votequest_payments?select=protocol,candidate,end_to_end_id,created_at&status=eq.pending&order=created_at.asc&limit=200'),
+      // Expire on the database clock first so the queue never shows a stale request.
+      await rpc(env, 'votequest_expire_stale')
+      const [open, results] = await Promise.all([
+        rest(env, 'votequest_payments?select=protocol,candidate,reference_code,status,created_at,confirmed_at,expires_at&status=in.(pending,review)&order=created_at.asc&limit=200'),
         readResults(env),
       ])
       return json(200, {
-        pending: (Array.isArray(pending) ? pending : []).map((item) => ({
+        pending: (Array.isArray(open) ? open : []).map((item) => ({
           protocol: item.protocol,
           candidate: item.candidate,
-          endToEndId: item.end_to_end_id,
-          createdAt: item.created_at,
+          referenceCode: item.reference_code,
+          status: item.status,
+          requestedAt: item.created_at,
+          confirmedAt: item.confirmed_at,
+          expiresAt: item.expires_at,
         })),
         verifiedCounts: results.verifiedCounts,
       })
@@ -362,7 +479,12 @@ async function handleRequest(req: Request, env: Env): Promise<Response> {
 
     try {
       const data = await rpc(env, 'votequest_decide_payment', { p_protocol: protocol, p_decision: decision })
-      if (data?.status === 'not_found') return json(404, { error: 'not_found', message: 'Pedido pendente não encontrado.' })
+      if (data?.status === 'not_found') {
+        return json(404, { error: 'not_found', message: 'Pedido pendente não encontrado.' })
+      }
+      if (data?.status === 'expired') {
+        return json(409, { error: 'expired', message: 'Este pedido passou do prazo de conferência e expirou.' })
+      }
       if (!['approved', 'rejected'].includes(data?.status)) {
         throw new Error('Supabase returned an invalid decision status.')
       }
@@ -388,4 +510,16 @@ if (typeof Deno !== 'undefined') {
   })
 }
 
-export { corsHeaders, getPixConfig, handleRequest, parsePixFields, hasValidPixCrc, normalizeResults }
+export {
+  buildDynamicPixCode,
+  corsHeaders,
+  getPixConfig,
+  handleRequest,
+  hasValidPixCrc,
+  newReferenceCode,
+  normalizeResults,
+  parsePixFields,
+  parsePixTlv,
+  pixCrc16,
+  voteWindowSeconds,
+}
