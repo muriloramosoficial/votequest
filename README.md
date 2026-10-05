@@ -1,4 +1,5 @@
 # VoteQuest
+.
 
 Protótipo React de uma página dividida entre PT · Lula e PL · Flávio. O placar visível é **demonstrativo**: 700.000 votos simulados, com percentuais ilustrativos de 62% e 38%. Não são resultados reais de votação ou pesquisa.
 
