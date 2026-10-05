@@ -11,8 +11,6 @@ const choices = [
     partyName: 'Partido dos Trabalhadores',
     tone: 'red',
     number: '01',
-    count: 434000,
-    percentage: 62,
   },
   {
     id: 'flavio',
@@ -21,8 +19,6 @@ const choices = [
     partyName: 'Partido Liberal',
     tone: 'green',
     number: '02',
-    count: 266000,
-    percentage: 38,
   },
 ];
 
@@ -70,7 +66,7 @@ function BrandMark() {
 
 const FALLBACK_PIX_CONFIG = DEFAULT_PIX_CONFIG;
 const emptyPixConfig = { ready: false, pixCode: '', receiverName: '', city: '', issue: 'missing' };
-const emptyVoteStats = { demoMode: true, verifiedCounts: { lula: 0, flavio: 0 }, manualCounts: { lula: 0, flavio: 0 } };
+const emptyVoteStats = { verifiedCounts: { lula: 0, flavio: 0 } };
 
 export default function App() {
   if (typeof window !== 'undefined' && window.location.pathname === '/admin') {
@@ -104,15 +100,12 @@ function VoteQuestPage() {
     [selected],
   );
   const actualTotal = choices.reduce((total, choice) => (
-    total + (voteStats.verifiedCounts[choice.id] || 0) + (voteStats.manualCounts[choice.id] || 0)
+    total + (voteStats.verifiedCounts[choice.id] || 0)
   ), 0);
-  const displayCount = (choice) => voteStats.demoMode
-    ? choice.count
-    : (voteStats.verifiedCounts[choice.id] || 0) + (voteStats.manualCounts[choice.id] || 0);
-  const displayPercentage = (choice) => {
-    if (voteStats.demoMode) return choice.percentage;
-    return actualTotal ? Math.round((displayCount(choice) / actualTotal) * 100) : 0;
-  };
+  const displayCount = (choice) => voteStats.verifiedCounts[choice.id] || 0;
+  const displayPercentage = (choice) => (
+    actualTotal ? Math.round((displayCount(choice) / actualTotal) * 100) : 0
+  );
 
   const refreshVoteStats = useCallback(async () => {
     try {
@@ -121,11 +114,9 @@ function VoteQuestPage() {
       const payload = await response.json();
       const verified = payload.verifiedCounts || payload.counts || payload;
       setVoteStats({
-        demoMode: payload.demoMode !== false,
-        verifiedCounts: { lula: Number(verified.lula) || 0, flavio: Number(verified.flavio) || 0 },
-        manualCounts: {
-          lula: Number(payload.manualCounts?.lula) || 0,
-          flavio: Number(payload.manualCounts?.flavio) || 0,
+        verifiedCounts: {
+          lula: Number(verified.lula) || 0,
+          flavio: Number(verified.flavio) || 0,
         },
       });
     } catch {
@@ -297,14 +288,12 @@ function VoteQuestPage() {
     <div className="votequest-app">
       <main
         className="split-screen"
-        aria-label="VoteQuest — demonstração de enquete"
+        aria-label="VoteQuest — enquete com pagamento Pix"
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
         {choices.map((choice, index) => {
           const isActiveMobileChoice = index === mobileChoiceIndex;
-          const verifiedCount = voteStats.verifiedCounts[choice.id] || 0;
-          const manualCount = voteStats.manualCounts[choice.id] || 0;
           const visibleCount = displayCount(choice);
           const visiblePercentage = displayPercentage(choice);
           return (
@@ -330,13 +319,13 @@ function VoteQuestPage() {
                 <span className="vote-button__arrow"><Icon name="arrow" size={17} /></span>
               </button>
 
-              <div className="vote-count" aria-label={`${visiblePercentage}% e ${numberFormat.format(visibleCount)} ${voteStats.demoMode ? 'votos simulados' : 'votos contabilizados'}`}>
+              <div className="vote-count" aria-label={`${visiblePercentage}% e ${numberFormat.format(visibleCount)} votos validados`}>
                 <div className="vote-count__line">
                   <strong className="vote-count__percentage">{visiblePercentage}%</strong>
-                  <span className="vote-count__quantity"><strong>{numberFormat.format(visibleCount)}</strong> {voteStats.demoMode ? 'votos simulados' : 'votos contabilizados'}</span>
+                  <span className="vote-count__quantity"><strong>{numberFormat.format(visibleCount)}</strong> votos validados</span>
                 </div>
                 <div className="vote-meter" aria-hidden="true"><i style={{ width: `${visiblePercentage}%` }} /></div>
-                <div className="verified-count"><span className="verified-count__dot" /><span>Pix aprovados: <strong>{numberFormat.format(verifiedCount)}</strong></span><span>·</span><span>manuais: <strong>{numberFormat.format(manualCount)}</strong></span></div>
+                <div className="verified-count"><span className="verified-count__dot" /><span>Pagamentos Pix aprovados: <strong>{numberFormat.format(visibleCount)}</strong></span></div>
               </div>
             </div>
             <span className="panel-index" aria-hidden="true">{choice.number} <i /> VoteQuest</span>
@@ -350,7 +339,7 @@ function VoteQuestPage() {
             <span className="brand-name">Vote<span>Quest</span></span>
           </a>
           <div className="header-pills">
-            <span className="status-pill status-pill--demo"><i className="status-pill__dot" /> {voteStats.demoMode ? 'Dados simulados' : 'Contagem real'}</span>
+            <span className="status-pill"><i className="status-pill__dot" /> Contagem real</span>
             <span className="price-pill"><Icon name="pix" size={15} /> R$ 10</span>
           </div>
         </header>
@@ -372,19 +361,17 @@ function VoteQuestPage() {
         </nav>
 
         <div className="intro-copy" id="top">
-          <div className="intro-eyebrow"><span className="intro-eyebrow__spark">✳</span> {voteStats.demoMode ? 'MODO DEMONSTRAÇÃO · NÃO SÃO VOTOS REAIS' : 'CONTAGEM REAL · COM AJUSTES ADMIN IDENTIFICADOS'}</div>
+          <div className="intro-eyebrow"><span className="intro-eyebrow__spark">✳</span> CONTAGEM REAL · PAGAMENTOS PIX APROVADOS</div>
           <h1>Prove seu voto<span>.</span></h1>
           <p>Doação simbólica de R$ 10,00 via Pix.</p>
-          <div className="demo-total"><strong>{numberFormat.format(voteStats.demoMode ? 700000 : actualTotal)}</strong><span>{voteStats.demoMode ? 'VOTOS ILUSTRATIVOS' : 'VOTOS CONTABILIZADOS'}</span></div>
+          <div className="total-count"><strong>{numberFormat.format(actualTotal)}</strong><span>VOTOS CONTABILIZADOS</span></div>
         </div>
 
         <div className="versus-badge" aria-hidden="true"><span>OU</span></div>
         <div className="mobile-swipe-hint" aria-hidden="true"><span>↔</span> Deslize para alternar</div>
 
         <footer className="site-footer">
-          {voteStats.demoMode
-            ? 'PLACAR DEMONSTRATIVO: total e percentuais simulados, sem relação com votos ou pesquisa reais.'
-            : 'CONTAGEM REAL: pagamentos aprovados + inclusões manuais identificadas. Pix estático exige conferência manual.'}
+          CONTAGEM REAL: apenas pagamentos Pix de R$ 10,00 aprovados pela conferência manual entram no placar.
         </footer>
       </main>
 
@@ -516,7 +503,7 @@ function VoteQuestPage() {
                       </div>
                     </div>
                   )}
-                  <p className="privacy-note">Enquete independente; o placar demonstrativo não é um resultado real.</p>
+                  <p className="privacy-note">Enquete independente; o placar não é um resultado eleitoral oficial.</p>
                 </>
               )}
             </div>
@@ -531,15 +518,9 @@ function AdminReviewPage() {
   const [tokenInput, setTokenInput] = useState('');
   const [adminToken, setAdminToken] = useState('');
   const [pending, setPending] = useState(null);
-  const [demoMode, setDemoMode] = useState(true);
-  const [manualCounts, setManualCounts] = useState({ lula: 0, flavio: 0 });
-  const [recentManualAdjustments, setRecentManualAdjustments] = useState([]);
-  const [manualForm, setManualForm] = useState({ candidate: 'lula', amount: '1', reason: '' });
+  const [verifiedCounts, setVerifiedCounts] = useState({ lula: 0, flavio: 0 });
   const [loading, setLoading] = useState(false);
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [savingManual, setSavingManual] = useState(false);
   const [busyProtocol, setBusyProtocol] = useState('');
-  const [manualFeedback, setManualFeedback] = useState('');
   const [error, setError] = useState('');
 
   const loadQueue = async (token = tokenInput) => {
@@ -549,14 +530,15 @@ function AdminReviewPage() {
     try {
       const response = await apiFetch('/api/admin/votes', { headers: { 'x-admin-token': token }, cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok || !Array.isArray(body.pending) || typeof body.demoMode !== 'boolean') {
+      if (!response.ok || !Array.isArray(body.pending)) {
         throw new Error(body.message || 'A API administrativa do Supabase não respondeu corretamente; confirme a Edge Function e a migration.');
       }
       setAdminToken(token);
-      setPending(Array.isArray(body.pending) ? body.pending : []);
-      setDemoMode(body.demoMode !== false);
-      setManualCounts({ lula: Number(body.manualCounts?.lula) || 0, flavio: Number(body.manualCounts?.flavio) || 0 });
-      setRecentManualAdjustments(Array.isArray(body.recentManualAdjustments) ? body.recentManualAdjustments : []);
+      setPending(body.pending);
+      setVerifiedCounts({
+        lula: Number(body.verifiedCounts?.lula) || 0,
+        flavio: Number(body.verifiedCounts?.flavio) || 0,
+      });
     } catch (loadError) {
       setPending(null);
       setError(loadError.message || 'Não foi possível autenticar.');
@@ -583,58 +565,6 @@ function AdminReviewPage() {
       setError(actionError.message || 'Não foi possível salvar a decisão.');
     } finally {
       setBusyProtocol('');
-    }
-  };
-
-  const updateDemoMode = async (event) => {
-    const nextDemoMode = event.target.checked;
-    setSavingSettings(true);
-    setError('');
-    try {
-      const response = await apiFetch('/api/admin/settings', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
-        body: JSON.stringify({ demoMode: nextDemoMode }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || typeof body.demoMode !== 'boolean') {
-        throw new Error(body.message || 'A API administrativa não confirmou o modo do placar.');
-      }
-      setDemoMode(body.demoMode);
-    } catch (settingError) {
-      setError(settingError.message || 'Não foi possível atualizar o modo.');
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
-  const addManualVotes = async (event) => {
-    event.preventDefault();
-    setSavingManual(true);
-    setManualFeedback('');
-    setError('');
-    try {
-      const response = await apiFetch('/api/admin/manual-votes', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
-        body: JSON.stringify({
-          candidate: manualForm.candidate,
-          amount: Number(manualForm.amount),
-          reason: manualForm.reason.trim(),
-        }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body.adjustment || !body.manualCounts) {
-        throw new Error(body.message || 'A API administrativa não confirmou a inclusão manual.');
-      }
-      setManualCounts(body.manualCounts);
-      setRecentManualAdjustments((current) => [body.adjustment, ...current].slice(0, 20));
-      setManualFeedback(`${numberFormat.format(body.adjustment.amount)} votos adicionados a ${choices.find((choice) => choice.id === body.adjustment.candidate)?.name || body.adjustment.candidate}.`);
-      setManualForm((current) => ({ ...current, amount: '1', reason: '' }));
-    } catch (manualError) {
-      setError(manualError.message || 'Não foi possível adicionar os votos.');
-    } finally {
-      setSavingManual(false);
     }
   };
 
@@ -682,68 +612,13 @@ function AdminReviewPage() {
             </form>
           ) : (
             <>
-              <section className="admin-tools" aria-label="Controles do placar">
-                <div className="demo-control">
-                  <div>
-                    <span className="admin-eyebrow">MODO DO PLACAR</span>
-                    <h3>{demoMode ? 'Demonstração ativada' : 'Contagem real ativada'}</h3>
-                    <p>{demoMode
-                      ? 'O público vê os números simulados; pagamentos aprovados e inclusões manuais ficam separados.'
-                      : 'O público vê votos aprovados + inclusões manuais, com a origem discriminada.'}</p>
-                  </div>
-                  <label className={`admin-toggle ${savingSettings ? 'admin-toggle--disabled' : ''}`}>
-                    <span className="sr-only">Ativar modo demonstrativo</span>
-                    <input type="checkbox" checked={demoMode} onChange={updateDemoMode} disabled={savingSettings} />
-                    <i aria-hidden="true" />
-                  </label>
-                </div>
-
-                <form className="manual-votes-form" onSubmit={addManualVotes}>
-                  <div className="manual-votes-form__heading">
-                    <div>
-                      <span className="admin-eyebrow">AJUSTE AUDITÁVEL</span>
-                      <h3>Adicionar votos manualmente</h3>
-                    </div>
-                    <p>Os votos manuais aparecem separados dos pagamentos aprovados.</p>
-                  </div>
-                  <div className="manual-votes-form__fields">
-                    <label className="field">
-                      <span>Candidato</span>
-                      <select value={manualForm.candidate} onChange={(event) => setManualForm({ ...manualForm, candidate: event.target.value })}>
-                        <option value="lula">PT · Lula</option>
-                        <option value="flavio">PL · Flávio</option>
-                      </select>
-                    </label>
-                    <label className="field">
-                      <span>Quantidade</span>
-                      <input type="number" min="1" max="1000000" step="1" required value={manualForm.amount} onChange={(event) => setManualForm({ ...manualForm, amount: event.target.value })} />
-                    </label>
-                    <label className="field field--wide">
-                      <span>Motivo para auditoria</span>
-                      <input type="text" minLength="3" maxLength="160" required value={manualForm.reason} onChange={(event) => setManualForm({ ...manualForm, reason: event.target.value })} placeholder="Ex.: correção de lote conferido" />
-                    </label>
-                    <button className="modal-primary" type="submit" disabled={savingManual}>
-                      {savingManual ? 'Salvando…' : 'Adicionar ao total manual'}
-                    </button>
-                  </div>
-                  {manualFeedback && <p className="manual-feedback" role="status">{manualFeedback}</p>}
-                </form>
-
-                <div className="manual-totals">
-                  <span>Manuais acumulados</span>
-                  <strong>PT {numberFormat.format(manualCounts.lula || 0)}</strong>
+              <section className="admin-tools" aria-label="Resumo da contagem">
+                <div className="approved-totals">
+                  <span>Pagamentos Pix aprovados</span>
+                  <strong>PT {numberFormat.format(verifiedCounts.lula || 0)}</strong>
                   <i />
-                  <strong>PL {numberFormat.format(manualCounts.flavio || 0)}</strong>
+                  <strong>PL {numberFormat.format(verifiedCounts.flavio || 0)}</strong>
                 </div>
-                {recentManualAdjustments.length > 0 && (
-                  <div className="manual-audit-list">
-                    <h4>Últimas inclusões</h4>
-                    {recentManualAdjustments.slice(0, 5).map((item) => {
-                      const choice = choices.find((candidate) => candidate.id === item.candidate);
-                      return <p key={item.id}><span>{numberFormat.format(item.amount)} · {choice?.party} {choice?.name}</span><small>{item.reason}</small></p>;
-                    })}
-                  </div>
-                )}
               </section>
 
               <div className="admin-queue-heading">
