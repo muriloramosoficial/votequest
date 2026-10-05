@@ -1,6 +1,6 @@
 # VoteQuest
-.
-Protótipo React de uma página dividida entre PT · Lula e PL · Flávio. No mobile, o split vira um deck em tela cheia com abas e navegação por swipe. O placar principal é **demonstrativo**: 700.000 votos simulados, com percentuais ilustrativos de 62% e 38%; não são resultados reais. Abaixo dele, os votos reais só aparecem após aprovação manual do Pix.
+
+Protótipo React em uma página com PT · Lula e PL · Flávio. No mobile, a tela vira um deck em tela cheia com abas e swipe. O modo demonstrativo vem ligado e exibe 700.000 votos simulados, claramente rotulados. No modo real, o placar mostra pagamentos Pix aprovados e votos manuais separadamente.
 
 ## Rodar localmente
 
@@ -9,22 +9,29 @@ Requer Node.js 22 ou superior.
 ```bash
 npm install
 cp .env.example .env
+# Preencha SUPABASE_SERVICE_ROLE_KEY e VOTEQUEST_ADMIN_TOKEN no .env local.
 npm run dev
 ```
 
-## Pix estático de R$ 10,00 e conferência
+## Supabase + Vercel
 
-O código Pix copia e cola fornecido está configurado. O servidor valida o CRC, exige QR estático e valor fixo de R$ 10,00; o checkout mostra o nome e a cidade do recebedor decodificados do Pix. Confira os dados do recebedor antes de publicar.
+O frontend e as funções HTTP ficam no próprio projeto Vercel; o Supabase fornece o banco. O navegador chama somente URLs relativas `/api/...`. A chave `service_role` nunca deve ir para código cliente, variável `VITE_*`, commit ou resposta da API. A chave anon não é usada pelo app.
 
-Um Pix estático não permite que este site consulte automaticamente se uma transferência foi liquidada. Por isso, após pagar, a pessoa pode enviar o E2E ID do comprovante para uma fila de revisão. A equipe verifica o identificador e o valor no extrato bancário e aprova/rejeita em `/admin`. Só pedidos aprovados entram nos contadores reais. Não coletamos CPF e não enviamos dados ao Telegram.
+1. No Supabase, abra **SQL Editor** e execute `supabase/migrations/20261005000000_votequest.sql`. Ela cria as tabelas, funções transacionais e políticas de acesso.
+2. Em **Vercel → Project → Settings → Environment Variables**, configure para os ambientes necessários:
+   - `SUPABASE_URL` — URL do projeto Supabase;
+   - `SUPABASE_SERVICE_ROLE_KEY` — segredo de servidor, sem prefixo `VITE_`;
+   - `VOTEQUEST_ADMIN_TOKEN` — segredo forte para `/admin`;
+   - `VOTEQUEST_PIX_CODE` — Pix copia e cola estático de R$ 10,00. O site tem fallback do código público atual.
+3. Faça o deploy do projeto Vite no Vercel. `api/[...route].js` publica as rotas serverless e o rewrite mantém o acesso SPA a `/admin`.
+4. Confira `https://seu-dominio/api/health`. Para ficar pronto, deve indicar `api: true`, `databaseReady: true`, `adminConfigured: true` e `pixReady: true`.
 
-Para habilitar a área `/admin`, defina `VOTEQUEST_ADMIN_TOKEN` no `.env` com um segredo forte. O token é digitado na página e mantido apenas na memória do navegador. A fila fica em `data/votes.json`: E2E ID e opção ficam associados somente enquanto o pedido está pendente; ao decidir, o vínculo é removido. Permanecem contagens agregadas, hash do E2E ID para impedir reutilização e o status do protocolo anônimo.
+Se `databaseReady` for falso, confira as variáveis e se a migration foi executada. Se `/api/health` retornar HTML/404, a função não foi publicada no projeto Vercel. Variáveis, por si só, não criam endpoints.
 
-## Build e produção
+## Pix, revisão e privacidade
 
-```bash
-npm run build
-npm start
-```
+O Pix estático não confirma pagamento automaticamente. A pessoa informa o E2E ID do comprovante com consentimento; um administrador confere manualmente no extrato o recebedor e o valor de R$ 10,00 antes de aprovar ou rejeitar. Não coletamos CPF nem enviamos dados ao Telegram. A opção e o E2E ID são apagados da associação após a decisão; permanece o hash antirreuso e o estado do protocolo.
 
-Em produção, use HTTPS e armazenamento persistente para `VOTEQUEST_DATA_FILE`. Não apresente os números demonstrativos como resultados reais. Antes de cobrar contribuições ligadas a uma enquete política, revise as regras legais aplicáveis e informe claramente aos participantes como o dinheiro e os dados de validação serão tratados.
+Em `/admin`, o administrador pode alternar entre placar demonstrativo e real, revisar pagamentos e incluir votos manuais com motivo de auditoria. O público vê pagamentos Pix aprovados e inclusões manuais em linhas separadas. Inclusões manuais não são apresentadas como pagamentos confirmados.
+
+Use HTTPS, limite o acesso ao token administrativo e rotacione imediatamente qualquer `service_role` que tenha sido exposta fora do gerenciador de segredos. Não use os números de demonstração como pesquisa ou resultado eleitoral real. Revise as regras legais antes de cobrar contribuições ligadas a uma enquete política.

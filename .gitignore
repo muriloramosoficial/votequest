@@ -1,8 +1,11 @@
 node_modules/
 dist/
+.vercel/
 .env
 .env.*
 !.env.example
+supabase/.temp/
+supabase/.branches/
 data/*.json
 data/*.tmp
 .DS_Store

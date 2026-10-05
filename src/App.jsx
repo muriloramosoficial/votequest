@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
+import { DEFAULT_PIX_CONFIG } from '../shared/pix-config.js';
 
 const choices = [
   {
@@ -66,7 +67,9 @@ function BrandMark() {
   );
 }
 
+const FALLBACK_PIX_CONFIG = DEFAULT_PIX_CONFIG;
 const emptyPixConfig = { ready: false, pixCode: '', receiverName: '', city: '', issue: 'missing' };
+const emptyVoteStats = { demoMode: true, verifiedCounts: { lula: 0, flavio: 0 }, manualCounts: { lula: 0, flavio: 0 } };
 
 export default function App() {
   if (typeof window !== 'undefined' && window.location.pathname === '/admin') {
@@ -80,12 +83,13 @@ function VoteQuestPage() {
   const [mobileChoiceIndex, setMobileChoiceIndex] = useState(0);
   const [isMobileLayout, setIsMobileLayout] = useState(() => typeof window !== 'undefined' && window.matchMedia('(max-width: 760px)').matches);
   const touchStart = useRef(null);
-  const [pixConfig, setPixConfig] = useState(emptyPixConfig);
+  const [pixConfig, setPixConfig] = useState(FALLBACK_PIX_CONFIG);
   const [pixConfigLoaded, setPixConfigLoaded] = useState(false);
   const pixCode = pixConfig.pixCode;
+  const [backendStatus, setBackendStatus] = useState({ checked: false, available: false, databaseReady: false, adminConfigured: false, pixReady: false });
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState('');
-  const [verifiedCounts, setVerifiedCounts] = useState({ lula: 0, flavio: 0 });
+  const [voteStats, setVoteStats] = useState(emptyVoteStats);
   const [modalStep, setModalStep] = useState('pix');
   const [endToEndId, setEndToEndId] = useState('');
   const [reviewConsent, setReviewConsent] = useState(false);
@@ -98,20 +102,68 @@ function VoteQuestPage() {
     () => choices.find((choice) => choice.id === selected) || null,
     [selected],
   );
+  const actualTotal = choices.reduce((total, choice) => (
+    total + (voteStats.verifiedCounts[choice.id] || 0) + (voteStats.manualCounts[choice.id] || 0)
+  ), 0);
+  const displayCount = (choice) => voteStats.demoMode
+    ? choice.count
+    : (voteStats.verifiedCounts[choice.id] || 0) + (voteStats.manualCounts[choice.id] || 0);
+  const displayPercentage = (choice) => {
+    if (voteStats.demoMode) return choice.percentage;
+    return actualTotal ? Math.round((displayCount(choice) / actualTotal) * 100) : 0;
+  };
+
+  const refreshVoteStats = useCallback(async () => {
+    try {
+      const response = await fetch('/api/pix/results', { cache: 'no-store' });
+      if (!response.ok) return;
+      const payload = await response.json();
+      const verified = payload.verifiedCounts || payload.counts || payload;
+      setVoteStats({
+        demoMode: payload.demoMode !== false,
+        verifiedCounts: { lula: Number(verified.lula) || 0, flavio: Number(verified.flavio) || 0 },
+        manualCounts: {
+          lula: Number(payload.manualCounts?.lula) || 0,
+          flavio: Number(payload.manualCounts?.flavio) || 0,
+        },
+      });
+    } catch {
+      // Keep the last known public counters if the server API is temporarily unreachable.
+    }
+  }, []);
 
   useEffect(() => {
+    let cancelled = false;
     fetch('/api/pix/config', { cache: 'no-store' })
       .then((response) => response.ok ? response.json() : null)
-      .then((config) => setPixConfig(config || emptyPixConfig))
-      .catch(() => setPixConfig(emptyPixConfig))
-      .finally(() => setPixConfigLoaded(true));
-    fetch('/api/pix/results', { cache: 'no-store' })
-      .then((response) => response.ok ? response.json() : null)
-      .then((counts) => {
-        if (counts) setVerifiedCounts({ lula: Number(counts.lula) || 0, flavio: Number(counts.flavio) || 0 });
+      .then((config) => {
+        if (cancelled) return;
+        if (config?.ready) setPixConfig(config);
+        else if (config?.issue === 'invalid') setPixConfig({ ...FALLBACK_PIX_CONFIG, issue: 'invalid-env' });
+        else setPixConfig(FALLBACK_PIX_CONFIG);
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => { if (!cancelled) setPixConfig(FALLBACK_PIX_CONFIG); })
+      .finally(() => { if (!cancelled) setPixConfigLoaded(true); });
+
+    fetch('/api/health', { cache: 'no-store' })
+      .then((response) => response.ok ? response.json() : null)
+      .then((health) => {
+        if (!cancelled) setBackendStatus({
+          checked: true,
+          available: Boolean(health?.api ?? health?.ok),
+          databaseReady: Boolean(health?.databaseReady ?? health?.ok),
+          adminConfigured: Boolean(health?.adminConfigured),
+          pixReady: Boolean(health?.pixReady),
+        });
+      })
+      .catch(() => {
+        if (!cancelled) setBackendStatus({ checked: true, available: false, databaseReady: false, adminConfigured: false, pixReady: false });
+      });
+
+    refreshVoteStats();
+    const interval = window.setInterval(refreshVoteStats, 12000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [refreshVoteStats]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(max-width: 760px)');
@@ -178,6 +230,10 @@ function VoteQuestPage() {
   const submitVoteForReview = async (event) => {
     event.preventDefault();
     if (!selectedChoice || !reviewConsent || submittingVote) return;
+    if (!backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured) {
+      setSubmissionError('A API Vercel, o banco Supabase e o token administrativo precisam estar configurados antes de enviar votos.');
+      return;
+    }
     setSubmittingVote(true);
     setSubmissionError('');
     try {
@@ -187,12 +243,22 @@ function VoteQuestPage() {
         body: JSON.stringify({ candidate: selectedChoice.id, endToEndId: endToEndId.trim() }),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.message || 'Não foi possível enviar o pedido.');
+      if (!response.ok) {
+        const serverMessage = response.status === 404
+          ? 'A API de revisão não está publicada neste hosting. O QR pode ser exibido, mas o envio do voto exige o servidor VoteQuest ativo.'
+          : body.message || 'Não foi possível enviar o pedido.';
+        throw new Error(serverMessage);
+      }
+      if (body.status !== 'pending' || typeof body.protocol !== 'string' || !body.protocol) {
+        throw new Error('A resposta da API de revisão é inválida. Confirme se o backend Node do VoteQuest está publicado.');
+      }
       setVoteProtocol(body.protocol);
       setVoteStatus('pending');
       setModalStep('submitted');
     } catch (error) {
-      setSubmissionError(error.message || 'Não foi possível enviar para revisão. Tente novamente.');
+      setSubmissionError(error instanceof TypeError
+        ? 'Servidor de revisão indisponível. Ative/deploy o backend Node do VoteQuest; variáveis de ambiente sozinhas não criam a API.'
+        : error.message || 'Não foi possível enviar para revisão. Tente novamente.');
     } finally {
       setSubmittingVote(false);
     }
@@ -203,15 +269,15 @@ function VoteQuestPage() {
     try {
       const response = await fetch(`/api/votes/status/${encodeURIComponent(voteProtocol)}`, { cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.message || 'Não foi possível consultar o protocolo.');
-      setVoteStatus(body.status);
-      if (body.status === 'approved') {
-        const resultsResponse = await fetch('/api/pix/results', { cache: 'no-store' });
-        const counts = await resultsResponse.json().catch(() => ({}));
-        setVerifiedCounts({ lula: Number(counts.lula) || 0, flavio: Number(counts.flavio) || 0 });
+      if (!response.ok || !['pending', 'approved', 'rejected'].includes(body.status)) {
+        throw new Error(body.message || 'A API de revisão não retornou um status válido.');
       }
+      setVoteStatus(body.status);
+      if (body.status === 'approved') await refreshVoteStats();
     } catch (error) {
-      setSubmissionError(error.message || 'Não foi possível consultar agora.');
+      setSubmissionError(error instanceof TypeError
+        ? 'Servidor de revisão indisponível neste endereço.'
+        : error.message || 'Não foi possível consultar agora.');
     }
   };
 
@@ -236,6 +302,10 @@ function VoteQuestPage() {
       >
         {choices.map((choice, index) => {
           const isActiveMobileChoice = index === mobileChoiceIndex;
+          const verifiedCount = voteStats.verifiedCounts[choice.id] || 0;
+          const manualCount = voteStats.manualCounts[choice.id] || 0;
+          const visibleCount = displayCount(choice);
+          const visiblePercentage = displayPercentage(choice);
           return (
           <section
             className={`candidate-panel candidate-panel--${choice.tone} ${isActiveMobileChoice ? 'is-mobile-active' : 'is-mobile-inactive'}`}
@@ -259,13 +329,13 @@ function VoteQuestPage() {
                 <span className="vote-button__arrow"><Icon name="arrow" size={17} /></span>
               </button>
 
-              <div className="vote-count" aria-label={`${choice.percentage}% e ${numberFormat.format(choice.count)} votos simulados`}>
+              <div className="vote-count" aria-label={`${visiblePercentage}% e ${numberFormat.format(visibleCount)} ${voteStats.demoMode ? 'votos simulados' : 'votos contabilizados'}`}>
                 <div className="vote-count__line">
-                  <strong className="vote-count__percentage">{choice.percentage}%</strong>
-                  <span className="vote-count__quantity"><strong>{numberFormat.format(choice.count)}</strong> votos simulados</span>
+                  <strong className="vote-count__percentage">{visiblePercentage}%</strong>
+                  <span className="vote-count__quantity"><strong>{numberFormat.format(visibleCount)}</strong> {voteStats.demoMode ? 'votos simulados' : 'votos contabilizados'}</span>
                 </div>
-                <div className="vote-meter" aria-hidden="true"><i style={{ width: `${choice.percentage}%` }} /></div>
-                <div className="verified-count"><span className="verified-count__dot" /><strong>{numberFormat.format(verifiedCounts[choice.id] || 0)}</strong><span>votos validados</span></div>
+                <div className="vote-meter" aria-hidden="true"><i style={{ width: `${visiblePercentage}%` }} /></div>
+                <div className="verified-count"><span className="verified-count__dot" /><span>Pix aprovados: <strong>{numberFormat.format(verifiedCount)}</strong></span><span>·</span><span>manuais: <strong>{numberFormat.format(manualCount)}</strong></span></div>
               </div>
             </div>
             <span className="panel-index" aria-hidden="true">{choice.number} <i /> VoteQuest</span>
@@ -279,7 +349,7 @@ function VoteQuestPage() {
             <span className="brand-name">Vote<span>Quest</span></span>
           </a>
           <div className="header-pills">
-            <span className="status-pill status-pill--demo"><i className="status-pill__dot" /> Dados simulados</span>
+            <span className="status-pill status-pill--demo"><i className="status-pill__dot" /> {voteStats.demoMode ? 'Dados simulados' : 'Contagem real'}</span>
             <span className="price-pill"><Icon name="pix" size={15} /> R$ 10</span>
           </div>
         </header>
@@ -295,23 +365,25 @@ function VoteQuestPage() {
             >
               <span className="mobile-choice-tab__party">{choice.party}</span>
               <span className="mobile-choice-tab__name">{choice.name}</span>
-              <span className="mobile-choice-tab__percentage">{choice.percentage}%</span>
+              <span className="mobile-choice-tab__percentage">{displayPercentage(choice)}%</span>
             </button>
           ))}
         </nav>
 
         <div className="intro-copy" id="top">
-          <div className="intro-eyebrow"><span className="intro-eyebrow__spark">✳</span> MODO DEMONSTRAÇÃO · NÃO SÃO VOTOS REAIS</div>
+          <div className="intro-eyebrow"><span className="intro-eyebrow__spark">✳</span> {voteStats.demoMode ? 'MODO DEMONSTRAÇÃO · NÃO SÃO VOTOS REAIS' : 'CONTAGEM REAL · COM AJUSTES ADMIN IDENTIFICADOS'}</div>
           <h1>Prove seu voto<span>.</span></h1>
           <p>Doação simbólica de R$ 10,00 via Pix.</p>
-          <div className="demo-total"><strong>700.000</strong><span>VOTOS ILUSTRATIVOS</span></div>
+          <div className="demo-total"><strong>{numberFormat.format(voteStats.demoMode ? 700000 : actualTotal)}</strong><span>{voteStats.demoMode ? 'VOTOS ILUSTRATIVOS' : 'VOTOS CONTABILIZADOS'}</span></div>
         </div>
 
         <div className="versus-badge" aria-hidden="true"><span>OU</span></div>
         <div className="mobile-swipe-hint" aria-hidden="true"><span>↔</span> Deslize para alternar</div>
 
         <footer className="site-footer">
-          PLACAR DEMONSTRATIVO: total e percentuais simulados, sem relação com votos ou pesquisa reais. O Pix não é validado automaticamente.
+          {voteStats.demoMode
+            ? 'PLACAR DEMONSTRATIVO: total e percentuais simulados, sem relação com votos ou pesquisa reais.'
+            : 'CONTAGEM REAL: pagamentos aprovados + inclusões manuais identificadas. Pix estático exige conferência manual.'}
         </footer>
       </main>
 
@@ -372,7 +444,7 @@ function VoteQuestPage() {
                       <span>Autorizo a conferência temporária deste identificador junto à minha opção. Após a decisão, o E2E ID e a opção saem da fila; apenas totais agregados são mantidos.</span>
                     </label>
                     {submissionError && <p className="inline-error form-error" role="alert">{submissionError}</p>}
-                    <button className="modal-primary" type="submit" disabled={!reviewConsent || submittingVote}>
+                    <button className="modal-primary" type="submit" disabled={!reviewConsent || submittingVote || !backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured}>
                       {submittingVote ? <><span className="mini-spinner mini-spinner--light" /> Enviando…</> : 'Enviar para conferência'}
                     </button>
                   </form>
@@ -404,7 +476,31 @@ function VoteQuestPage() {
                         <strong>Como o pagamento é validado?</strong>
                         <p>Depois do Pix, informe o E2E ID do comprovante. A equipe confere o valor de R$ 10,00 no extrato e aprova ou rejeita manualmente. Nenhum CPF é solicitado ou enviado ao Telegram.</p>
                       </div>
-                      <button className="verify-button" type="button" onClick={() => { setModalStep('review'); setSubmissionError(''); }}>Já fiz o Pix — enviar para conferência</button>
+                      <div className={`backend-status-note ${backendStatus.available && backendStatus.databaseReady && backendStatus.adminConfigured && backendStatus.pixReady ? 'backend-status-note--ready' : 'backend-status-note--warning'}`} role="status">
+                        {!backendStatus.checked
+                          ? 'Verificando API e banco de dados…'
+                          : !backendStatus.available
+                            ? 'API Vercel indisponível neste domínio. Confirme que as funções /api foram publicadas.'
+                            : !backendStatus.databaseReady
+                              ? 'API Vercel ativa, mas o Supabase ainda não está configurado ou a migration não foi aplicada. Não pague até concluir a configuração.'
+                              : !backendStatus.adminConfigured
+                                ? 'Banco conectado, mas falta VOTEQUEST_ADMIN_TOKEN no Vercel. A revisão está desativada; não pague ainda.'
+                                : !backendStatus.pixReady
+                                  ? 'VOTEQUEST_PIX_CODE inválido no servidor. Está sendo mostrado o QR oficial de contingência; confira recebedor e valor antes de pagar.'
+                                  : 'API Vercel e Supabase ativos. O E2E ID será conferido manualmente.'}
+                      </div>
+                      <button
+                        className="verify-button"
+                        type="button"
+                        disabled={!backendStatus.checked || !backendStatus.available || !backendStatus.databaseReady || !backendStatus.adminConfigured}
+                        onClick={() => { setModalStep('review'); setSubmissionError(''); }}
+                      >
+                        {!backendStatus.checked ? 'Verificando servidor…'
+                          : !backendStatus.available ? 'API Vercel indisponível'
+                            : !backendStatus.databaseReady ? 'Banco Supabase não configurado'
+                              : !backendStatus.adminConfigured ? 'Revisão não configurada'
+                                : 'Já fiz o Pix — enviar para conferência'}
+                      </button>
                     </>
                   ) : (
                     <div className="setup-callout" role="status">
@@ -434,8 +530,15 @@ function AdminReviewPage() {
   const [tokenInput, setTokenInput] = useState('');
   const [adminToken, setAdminToken] = useState('');
   const [pending, setPending] = useState(null);
+  const [demoMode, setDemoMode] = useState(true);
+  const [manualCounts, setManualCounts] = useState({ lula: 0, flavio: 0 });
+  const [recentManualAdjustments, setRecentManualAdjustments] = useState([]);
+  const [manualForm, setManualForm] = useState({ candidate: 'lula', amount: '1', reason: '' });
   const [loading, setLoading] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [savingManual, setSavingManual] = useState(false);
   const [busyProtocol, setBusyProtocol] = useState('');
+  const [manualFeedback, setManualFeedback] = useState('');
   const [error, setError] = useState('');
 
   const loadQueue = async (token = tokenInput) => {
@@ -445,9 +548,14 @@ function AdminReviewPage() {
     try {
       const response = await fetch('/api/admin/votes', { headers: { 'x-admin-token': token }, cache: 'no-store' });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.message || 'Não foi possível abrir a fila de revisão.');
+      if (!response.ok || !Array.isArray(body.pending) || typeof body.demoMode !== 'boolean') {
+        throw new Error(body.message || 'A API administrativa não respondeu corretamente; confirme se o backend Node está publicado.');
+      }
       setAdminToken(token);
       setPending(Array.isArray(body.pending) ? body.pending : []);
+      setDemoMode(body.demoMode !== false);
+      setManualCounts({ lula: Number(body.manualCounts?.lula) || 0, flavio: Number(body.manualCounts?.flavio) || 0 });
+      setRecentManualAdjustments(Array.isArray(body.recentManualAdjustments) ? body.recentManualAdjustments : []);
     } catch (loadError) {
       setPending(null);
       setError(loadError.message || 'Não foi possível autenticar.');
@@ -466,12 +574,66 @@ function AdminReviewPage() {
         body: JSON.stringify({ decision }),
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.message || 'Não foi possível salvar a decisão.');
+      if (!response.ok || !['approved', 'rejected'].includes(body.status)) {
+        throw new Error(body.message || 'A API de revisão não confirmou a decisão.');
+      }
       await loadQueue(adminToken);
     } catch (actionError) {
       setError(actionError.message || 'Não foi possível salvar a decisão.');
     } finally {
       setBusyProtocol('');
+    }
+  };
+
+  const updateDemoMode = async (event) => {
+    const nextDemoMode = event.target.checked;
+    setSavingSettings(true);
+    setError('');
+    try {
+      const response = await fetch('/api/admin/settings', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
+        body: JSON.stringify({ demoMode: nextDemoMode }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || typeof body.demoMode !== 'boolean') {
+        throw new Error(body.message || 'A API administrativa não confirmou o modo do placar.');
+      }
+      setDemoMode(body.demoMode);
+    } catch (settingError) {
+      setError(settingError.message || 'Não foi possível atualizar o modo.');
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const addManualVotes = async (event) => {
+    event.preventDefault();
+    setSavingManual(true);
+    setManualFeedback('');
+    setError('');
+    try {
+      const response = await fetch('/api/admin/manual-votes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': adminToken },
+        body: JSON.stringify({
+          candidate: manualForm.candidate,
+          amount: Number(manualForm.amount),
+          reason: manualForm.reason.trim(),
+        }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body.adjustment || !body.manualCounts) {
+        throw new Error(body.message || 'A API administrativa não confirmou a inclusão manual.');
+      }
+      setManualCounts(body.manualCounts);
+      setRecentManualAdjustments((current) => [body.adjustment, ...current].slice(0, 20));
+      setManualFeedback(`${numberFormat.format(body.adjustment.amount)} votos adicionados a ${choices.find((choice) => choice.id === body.adjustment.candidate)?.name || body.adjustment.candidate}.`);
+      setManualForm((current) => ({ ...current, amount: '1', reason: '' }));
+    } catch (manualError) {
+      setError(manualError.message || 'Não foi possível adicionar os votos.');
+    } finally {
+      setSavingManual(false);
     }
   };
 
@@ -519,6 +681,70 @@ function AdminReviewPage() {
             </form>
           ) : (
             <>
+              <section className="admin-tools" aria-label="Controles do placar">
+                <div className="demo-control">
+                  <div>
+                    <span className="admin-eyebrow">MODO DO PLACAR</span>
+                    <h3>{demoMode ? 'Demonstração ativada' : 'Contagem real ativada'}</h3>
+                    <p>{demoMode
+                      ? 'O público vê os números simulados; pagamentos aprovados e inclusões manuais ficam separados.'
+                      : 'O público vê votos aprovados + inclusões manuais, com a origem discriminada.'}</p>
+                  </div>
+                  <label className={`admin-toggle ${savingSettings ? 'admin-toggle--disabled' : ''}`}>
+                    <span className="sr-only">Ativar modo demonstrativo</span>
+                    <input type="checkbox" checked={demoMode} onChange={updateDemoMode} disabled={savingSettings} />
+                    <i aria-hidden="true" />
+                  </label>
+                </div>
+
+                <form className="manual-votes-form" onSubmit={addManualVotes}>
+                  <div className="manual-votes-form__heading">
+                    <div>
+                      <span className="admin-eyebrow">AJUSTE AUDITÁVEL</span>
+                      <h3>Adicionar votos manualmente</h3>
+                    </div>
+                    <p>Os votos manuais aparecem separados dos pagamentos aprovados.</p>
+                  </div>
+                  <div className="manual-votes-form__fields">
+                    <label className="field">
+                      <span>Candidato</span>
+                      <select value={manualForm.candidate} onChange={(event) => setManualForm({ ...manualForm, candidate: event.target.value })}>
+                        <option value="lula">PT · Lula</option>
+                        <option value="flavio">PL · Flávio</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Quantidade</span>
+                      <input type="number" min="1" max="1000000" step="1" required value={manualForm.amount} onChange={(event) => setManualForm({ ...manualForm, amount: event.target.value })} />
+                    </label>
+                    <label className="field field--wide">
+                      <span>Motivo para auditoria</span>
+                      <input type="text" minLength="3" maxLength="160" required value={manualForm.reason} onChange={(event) => setManualForm({ ...manualForm, reason: event.target.value })} placeholder="Ex.: correção de lote conferido" />
+                    </label>
+                    <button className="modal-primary" type="submit" disabled={savingManual}>
+                      {savingManual ? 'Salvando…' : 'Adicionar ao total manual'}
+                    </button>
+                  </div>
+                  {manualFeedback && <p className="manual-feedback" role="status">{manualFeedback}</p>}
+                </form>
+
+                <div className="manual-totals">
+                  <span>Manuais acumulados</span>
+                  <strong>PT {numberFormat.format(manualCounts.lula || 0)}</strong>
+                  <i />
+                  <strong>PL {numberFormat.format(manualCounts.flavio || 0)}</strong>
+                </div>
+                {recentManualAdjustments.length > 0 && (
+                  <div className="manual-audit-list">
+                    <h4>Últimas inclusões</h4>
+                    {recentManualAdjustments.slice(0, 5).map((item) => {
+                      const choice = choices.find((candidate) => candidate.id === item.candidate);
+                      return <p key={item.id}><span>{numberFormat.format(item.amount)} · {choice?.party} {choice?.name}</span><small>{item.reason}</small></p>;
+                    })}
+                  </div>
+                )}
+              </section>
+
               <div className="admin-queue-heading">
                 <div>
                   <span className="admin-eyebrow">PENDENTES</span>

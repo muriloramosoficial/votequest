@@ -1,0 +1,7 @@
+export const DEFAULT_PIX_CONFIG = Object.freeze({
+  ready: true,
+  pixCode: '00020101021126710014br.gov.bcb.pix0136633fdcad-0185-4292-a6cb-42a9d77aba810209VoteQuest520400005303986540510.005802BR5921OMNIGOVS S COMERCIAIS6006TOLEDO62070503***63042375',
+  receiverName: 'OMNIGOVS S COMERCIAIS',
+  city: 'TOLEDO',
+  issue: '',
+});
