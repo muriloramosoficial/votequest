@@ -51,6 +51,19 @@ npm run dev
 
 Os valores públicos atuais já estão em `shared/supabase-public.js`; `VITE_SUPABASE_URL` e `VITE_SUPABASE_ANON_KEY` no `.env` servem apenas para sobrescrevê-los. Não coloque segredo administrativo ou chave de serviço no `.env` do frontend.
 
+## Analytics
+
+O Google Analytics 4 está instalado direto no `index.html` com a tag `G-H2Z6VQ07WQ` (measurement id público, segura para ir no HTML).
+
+Duas decisões deliberadas:
+
+- **`/admin` não é medido.** A tela mantém o token administrativo em memória; o `page_view` é enviado manualmente e pulado nesse caminho, então nada daquela tela entra nos reports.
+- **Só são enviados `page_view`.** Nada de código de referência, protocolo, Pix ou opção de voto vai para o GA. Nenhum evento customizado de funil foi adicionado — se quiser medir a queda entre "Como votar", "gerou Pix" e "avisei que paguei", é só acrescentar `gtag('event', ...)` nos handlers correspondentes.
+
+Para trocar a tag, edite o `index.html`. Deixá-la em variável de ambiente exigiria placeholder `%VITE_*%`, que quebra o snippet silenciosamente quando a variável não está definida.
+
+Lembre que o GA é bloqueado por boa parte dos ad blockers e extensões de privacidade, então os números ficam subestimados por natureza.
+
 ## Pix, revisão e privacidade
 
 Pix não confirma pagamento automaticamente, e CPF não tem relação com Pix: nenhum CPF é coletado e nada é enviado ao Telegram.
