@@ -172,7 +172,7 @@ function tlv(tag: string, value: string): string {
 
 // Rebuilds the BR Code with a per-vote TxID in the additional data field, then recomputes the
 // CRC16. Everything else (key, receiver, city, amount) comes from the validated base payload, so
-// the payer always sees the same receiver and the same R$ 10,00 amount.
+// the payer always sees the same receiver and the same R$ 1,00 amount.
 function buildDynamicPixCode(basePixCode: string, txid: string): string | null {
   if (!referencePattern.test(txid) || txid.length > maxTxidLength) return null
   const fields = parsePixTlv(basePixCode)
@@ -195,7 +195,7 @@ function getPixConfig(env: Env) {
   const valid = Boolean(
     fields
       && fields['01'] === '11'
-      && fields['54'] === '10.00'
+      && fields['54'] === '1.00'
       && fields['59'] === 'OMNIGOVS S COMERCIAIS'
       && fields['60'] === 'TOLEDO'
       && hasValidPixCrc(pixCode),

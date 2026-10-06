@@ -1,6 +1,6 @@
 # VoteQuest
 
-Página React com PT · Lula e PL · Flávio. No mobile, a tela vira um deck em tela cheia com abas e swipe. Cada voto gera um Pix próprio, com um código de referência curto embutido como TxID. O placar mostra exclusivamente os pagamentos Pix de R$ 10,00 localizados no extrato pela conferência manual desse código.
+Página React com PT · Lula e PL · Flávio. No mobile, a tela vira um deck em tela cheia com abas e swipe. Cada voto gera um Pix próprio, com um código de referência curto embutido como TxID. O placar mostra exclusivamente os pagamentos Pix de R$ 1,00 localizados no extrato pela conferência manual desse código.
 
 ## Onde roda o backend
 
@@ -73,7 +73,7 @@ Quando o voto começa, a Edge Function gera um código aleatório de 8 caractere
 
 O modal abre sempre em **"Como votar"**, antes de qualquer pagamento: três passos numerados e um bloco explicando por que o código é necessário (o banco só informa o valor recebido, não quem pagou, então o código é o único vínculo entre o Pix e o voto). O Pix e o pedido só são criados quando a pessoa avança para a próxima tela, de modo que abrir e fechar o diálogo não deixa lixo na fila.
 
-Ao tocar em **Já fiz o Pix**, a pessoa apenas confirma, sem digitar nada, e a função registra `confirmed_at`. O administrador busca o código no extrato, confere recebedor e valor de R$ 10,00, e compara o horário do pagamento com a janela do pedido.
+Ao tocar em **Já fiz o Pix**, a pessoa apenas confirma, sem digitar nada, e a função registra `confirmed_at`. O administrador busca o código no extrato, confere recebedor e valor de R$ 1,00, e compara o horário do pagamento com a janela do pedido.
 
 A opção do voto fica na fila até a decisão. O código de referência é uma string aleatória sem vínculo com CPF ou documento, e por isso é mantido depois da decisão — era ele, e não a opção, que precisava de limpeza, e a opção agora permanece para que o recibo possa dizer o que foi validado.
 

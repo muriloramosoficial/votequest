@@ -67,7 +67,7 @@ function BrandMark() {
 
 function formatAmount(amount) {
   const value = Number(amount);
-  if (!Number.isFinite(value)) return 'R$ 10,00';
+  if (!Number.isFinite(value)) return 'R$ 1,00';
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
@@ -405,7 +405,7 @@ function VoteQuestPage() {
           </a>
           <div className="header-pills">
             <span className="status-pill"><i className="status-pill__dot" /> Contagem real</span>
-            <span className="price-pill"><Icon name="pix" size={15} /> R$ 10</span>
+            <span className="price-pill"><Icon name="pix" size={15} /> R$ 1</span>
           </div>
         </header>
 
@@ -428,7 +428,7 @@ function VoteQuestPage() {
         <div className="intro-copy" id="top">
           <div className="intro-eyebrow"><span className="intro-eyebrow__spark">✳</span> CONTAGEM REAL · PAGAMENTOS PIX APROVADOS</div>
           <h1>Prove seu voto<span>.</span></h1>
-          <p>Doação simbólica de R$ 10,00 via Pix.</p>
+          <p>Doação simbólica de R$ 1,00 via Pix.</p>
           <div className="total-count"><strong>{numberFormat.format(actualTotal)}</strong><span>VOTOS CONTABILIZADOS</span></div>
         </div>
 
@@ -436,7 +436,7 @@ function VoteQuestPage() {
         <div className="mobile-swipe-hint" aria-hidden="true"><span>↔</span> Deslize para alternar</div>
 
         <footer className="site-footer">
-          CONTAGEM REAL: cada voto gera um Pix com código próprio; só entra no placar o Pix de R$ 10,00 localizado no extrato.
+          CONTAGEM REAL: cada voto gera um Pix com código próprio; só entra no placar o Pix de R$ 1,00 localizado no extrato.
         </footer>
       </main>
 
@@ -862,7 +862,7 @@ function AdminReviewPage() {
         <div className="admin-heading">
           <span className="admin-eyebrow">ÁREA RESTRITA</span>
           <h1>Revisão de pagamentos Pix</h1>
-          <p>Busque o código de referência no extrato. Aprove somente Pix liquidados de R$ 10,00 anteriores ao prazo do pedido.</p>
+          <p>Busque o código de referência no extrato. Aprove somente Pix liquidados de R$ 1,00 anteriores ao prazo do pedido.</p>
         </div>
 
         <section className="admin-card">
@@ -935,7 +935,7 @@ function AdminReviewPage() {
                           <div><dt>Expira em</dt><dd>{formatMoment(item.expiresAt)}</dd></div>
                         </dl>
 
-                        <p>No extrato, busque pelo código <strong>{item.referenceCode}</strong>: valor R$ 10,00, recebedor e status liquidado.</p>
+                        <p>No extrato, busque pelo código <strong>{item.referenceCode}</strong>: valor R$ 1,00, recebedor e status liquidado.</p>
 
                         <div className="admin-actions">
                           <button type="button" className="admin-reject" onClick={() => decideVote(item.protocol, 'reject')} disabled={busyProtocol === item.protocol}>Rejeitar</button>
