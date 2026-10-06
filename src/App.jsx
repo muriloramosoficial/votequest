@@ -91,9 +91,16 @@ function voteStatusMessage(status, choiceName) {
   return 'Pix gerado. Pague e toque em “Já fiz o Pix”.';
 }
 
+// votequest.com.br/<reference code>. Case-insensitive because the receipt is typed from the
+// bank's "identificador", which may come back in any case.
+const receiptPathPattern = /^\/([23456789A-HJ-NP-Z]{8})$/i;
+
 export default function App() {
-  if (typeof window !== 'undefined' && window.location.pathname === '/admin') {
-    return <AdminReviewPage />;
+  if (typeof window !== 'undefined') {
+    const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+    if (pathname === '/admin') return <AdminReviewPage />;
+    const receiptMatch = pathname.match(receiptPathPattern);
+    if (receiptMatch) return <ReceiptPage code={receiptMatch[1].toUpperCase()} />;
   }
   return <VoteQuestPage />;
 }
@@ -619,6 +626,168 @@ function VoteQuestPage() {
   );
 }
 
+const receiptStatusCopy = {
+  pending: {
+    label: 'Aguardando confirmação',
+    hint: 'Pagador ainda não tocou em “Já fiz o Pix”. Se você já pagou, registre abaixo; o admin também pode aprovar sem isso.',
+  },
+  review: {
+    label: 'Aguardando conferência',
+    hint: 'Pagamento confirmado e agora na fila do administrador, para conferência no extrato.',
+  },
+  approved: {
+    label: 'Pagamento aprovado',
+    hint: 'O Pix foi localizado no extrato e este voto já conta no placar.',
+  },
+  rejected: {
+    label: 'Pagamento não localizado',
+    hint: 'O código não apareceu liquidado no prazo. Se você pagou, fale com a equipe.',
+  },
+  expired: {
+    label: 'Prazo encerrado',
+    hint: 'Este pedido passou da janela de uma hora. Se você pagou, fale com a equipe.',
+  },
+};
+
+function ReceiptPage({ code }) {
+  const [receipt, setReceipt] = useState(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const receiptUrl = typeof window !== 'undefined' ? `${window.location.origin}/${code.toLowerCase()}` : `/${code.toLowerCase()}`;
+
+  const loadReceipt = useCallback(async () => {
+    try {
+      const response = await apiFetch(`/api/votes/receipt/${encodeURIComponent(code)}`, { cache: 'no-store' });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.message || 'Recibo não encontrado.');
+      setReceipt(body);
+      setError('');
+    } catch (loadError) {
+      setReceipt(null);
+      setError(loadError.message || 'Não foi possível carregar o recibo.');
+    } finally {
+      setLoading(false);
+    }
+  }, [code]);
+
+  useEffect(() => {
+    loadReceipt();
+  }, [loadReceipt]);
+
+  const confirmPix = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await apiFetch('/api/votes/intent/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ protocol: receipt.protocol }),
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.message || 'Não foi possível registrar a confirmação.');
+      await loadReceipt();
+    } catch (confirmError) {
+      setError(confirmError.message || 'Não foi possível registrar a confirmação.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(receiptUrl);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2200);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const choice = receipt ? choices.find((item) => item.id === receipt.candidate) : null;
+  const copy = receipt ? receiptStatusCopy[receipt.status] || receiptStatusCopy.pending : null;
+
+  return (
+    <div className="admin-page receipt-page">
+      <header className="admin-topbar">
+        <a className="brand admin-brand" href="/" aria-label="VoteQuest — início">
+          <BrandMark />
+          <span className="brand-name">Vote<span>Quest</span></span>
+        </a>
+        <a className="admin-back-link" href="/">Voltar ao site <Icon name="arrow" size={15} /></a>
+      </header>
+
+      <main className="admin-shell">
+        <div className="admin-heading">
+          <span className="admin-eyebrow">RECIBO VOTEQUEST</span>
+          <h1>Recibo do voto</h1>
+          <p>Guarde ou compartilhe este link. Ele mostra o status do pagamento pelo código que aparece no seu comprovante Pix — nenhum dado seu.</p>
+        </div>
+
+        <section className="admin-card">
+          {loading && <p className="receipt-loading">Carregando recibo…</p>}
+
+          {!loading && error && !receipt && (
+            <div className="receipt-missing">
+              <p className="inline-error" role="alert">{error}</p>
+              <a className="verify-button" href="/">Voltar ao início</a>
+            </div>
+          )}
+
+          {!loading && receipt && (
+            <div className="receipt-body">
+              <div className="receipt-head">
+                <code className="receipt-code">{receipt.referenceCode}</code>
+                <span className={`receipt-status receipt-status--${receipt.status}`}>{copy.label}</span>
+              </div>
+
+              <div className="receipt-choice">
+                {choice ? (
+                  <>
+                    <span className={`admin-option admin-option--${choice.tone}`}>{choice.party} · {choice.partyName}</span>
+                    <strong className={`receipt-choice__name receipt-choice__name--${choice.tone}`}>{choice.name}</strong>
+                  </>
+                ) : (
+                  <span className="receipt-choice__name receipt-choice__name--unknown">Opção não associada</span>
+                )}
+              </div>
+
+              <p className="receipt-hint">{copy.hint}</p>
+
+              <dl className="admin-timeline receipt-timeline">
+                <div><dt>Pedido criado</dt><dd>{formatMoment(receipt.requestedAt)}</dd></div>
+                {receipt.confirmedAt && <div><dt>“Já fiz o Pix”</dt><dd>{formatMoment(receipt.confirmedAt)}</dd></div>}
+                <div><dt>Prazo</dt><dd>{formatMoment(receipt.expiresAt)}</dd></div>
+                {receipt.decidedAt && <div><dt>Decidido em</dt><dd>{formatMoment(receipt.decidedAt)}</dd></div>}
+              </dl>
+
+              <p className="receipt-link-line">Este recibo: <code>{receiptUrl}</code></p>
+
+              {error && <p className="inline-error" role="alert">{error}</p>}
+
+              <div className="receipt-actions">
+                <button type="button" className="verify-button" onClick={copyLink}>
+                  <Icon name={copied ? 'check' : 'copy'} size={15} />
+                  {copied ? 'Link copiado' : 'Copiar link do recibo'}
+                </button>
+                {receipt.status === 'pending' && receipt.protocol && (
+                  <button type="button" className="receipt-confirm" onClick={confirmPix} disabled={busy}>
+                    {busy ? 'Registrando…' : 'Já fiz o Pix'}
+                  </button>
+                )}
+              </div>
+
+              <p className="receipt-note">Este link não contém CPF, nome ou dados bancários: só o código aleatório, a opção escolhida e o status. O token administrativo nunca aparece aqui.</p>
+            </div>
+          )}
+        </section>
+      </main>
+    </div>
+  );
+}
+
 function AdminReviewPage() {
   const [tokenInput, setTokenInput] = useState('');
   const [adminToken, setAdminToken] = useState('');
@@ -748,13 +917,16 @@ function AdminReviewPage() {
                             {choice?.party || item.candidate} · {choice?.name || 'Opção'}
                           </span>
                           <span className={`admin-await ${awaitingReview ? 'admin-await--ready' : ''}`}>
-                            {awaitingReview ? 'Aguardando conferência' : 'QR gerado, pagador ainda não confirmou'}
+                            {awaitingReview ? 'Aguardando conferência' : 'Pagador ainda não confirmou'}
                           </span>
                         </div>
 
                         <div className="admin-reference">
                           <span>CÓDIGO DE REFERÊNCIA (TxID NO PIX)</span>
                           <code>{item.referenceCode}</code>
+                          <a className="admin-receipt-link" href={`/${String(item.referenceCode).toLowerCase()}`}>
+                            Recibo do pagador <Icon name="arrow" size={13} />
+                          </a>
                         </div>
 
                         <dl className="admin-timeline">
@@ -779,7 +951,7 @@ function AdminReviewPage() {
             </>
           )}
         </section>
-        <p className="admin-data-note">Cada voto tem um código de referência aleatório, sem vínculo com CPF ou documento. A fila guarda a opção até a decisão e expira pedidos após uma hora; ao aprovar/rejeitar, a opção sai da fila e permanecem apenas o placar agregado, um hash antirreuso e o status do protocolo. O token fica somente na memória desta página.</p>
+        <p className="admin-data-note">Cada voto tem um código de referência aleatório, sem vínculo com CPF ou documento — e cada código vira um recibo público em <strong>votequest.com.br/seucodigo</strong>, que o pagador pode abrir para conferir o status. A fila guarda a opção até a decisão e expira pedidos após uma hora. Aprove ou rejeite inclusive pedidos que o pagador ainda não confirmou: quem paga e fecha a tela pode confirmar depois pelo recibo. O token fica somente na memória desta página.</p>
       </main>
     </div>
   );

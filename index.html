@@ -14,8 +14,10 @@
       function gtag() { window.dataLayer.push(arguments); }
       gtag('js', new Date());
       gtag('config', 'G-H2Z6VQ07WQ', { send_page_view: false });
-      // /admin holds the administrative token in memory, so it is never measured.
-      if (window.location.pathname !== '/admin') {
+      // /admin holds the administrative token in memory and a /xxxxxxxx receipt link encodes
+      // the reference code, so neither path is ever sent to Analytics.
+      var isReceiptPath = /^\/[23456789A-HJ-NP-Z]{8}$/i.test(window.location.pathname.replace(/\/+$/, ''));
+      if (window.location.pathname !== '/admin' && !isReceiptPath) {
         gtag('event', 'page_view', {
           page_path: window.location.pathname,
           page_location: window.location.href,

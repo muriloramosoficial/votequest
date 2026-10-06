@@ -439,6 +439,37 @@ async function handleRequest(req: Request, env: Env): Promise<Response> {
     }
   }
 
+  if (method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'votes' && segments[2] === 'receipt') {
+    // Public by design: anyone holding the receipt link may open it, which is what makes
+    // votequest.com.br/<code> work. The row carries no personal data, and the code is a random
+    // 8-character string that is not enumerable.
+    const code = segments[3].toUpperCase()
+    if (!referencePattern.test(code)) return json(404, { error: 'not_found', message: 'Recibo não encontrado.' })
+    try {
+      await rpc(env, 'votequest_expire_stale')
+      const rows = await rest(
+        env,
+        `votequest_payments?select=reference_code,protocol,candidate,status,created_at,confirmed_at,expires_at,decided_at&reference_code=eq.${code}&limit=1`,
+      )
+      const record = Array.isArray(rows) ? rows[0] : null
+      if (!record) return json(404, { error: 'not_found', message: 'Recibo não encontrado.' })
+      return json(200, {
+        referenceCode: record.reference_code,
+        // Returned so the payer can press "Já fiz o Pix" from this page after closing the dialog.
+        // It only unlocks status reads and confirmations, never an admin decision.
+        protocol: record.protocol,
+        candidate: record.candidate,
+        status: record.status,
+        requestedAt: record.created_at,
+        confirmedAt: record.confirmed_at,
+        expiresAt: record.expires_at,
+        decidedAt: record.decided_at,
+      })
+    } catch (error) {
+      return databaseFailure('load receipt', error)
+    }
+  }
+
   if (method === 'GET' && route === '/api/admin/votes') {
     const auth = authorized(env, req)
     if (!auth.ok) return auth.response

@@ -55,9 +55,10 @@ Os valores públicos atuais já estão em `shared/supabase-public.js`; `VITE_SUP
 
 O Google Analytics 4 está instalado direto no `index.html` com a tag `G-H2Z6VQ07WQ` (measurement id público, segura para ir no HTML).
 
-Duas decisões deliberadas:
+Três decisões deliberadas:
 
 - **`/admin` não é medido.** A tela mantém o token administrativo em memória; o `page_view` é enviado manualmente e pulado nesse caminho, então nada daquela tela entra nos reports.
+- **Caminhos de recibo não são medidos.** `votequest.com.br/gash3ms2` tem o código no caminho da página, e a URL do recibo não deve vazar para a Google. O teste cobre isso: no recibo o `config` é configurado e nenhum `page_view` sai.
 - **Só são enviados `page_view`.** Nada de código de referência, protocolo, Pix ou opção de voto vai para o GA. Nenhum evento customizado de funil foi adicionado — se quiser medir a queda entre "Como votar", "gerou Pix" e "avisei que paguei", é só acrescentar `gtag('event', ...)` nos handlers correspondentes.
 
 Para trocar a tag, edite o `index.html`. Deixá-la em variável de ambiente exigiria placeholder `%VITE_*%`, que quebra o snippet silenciosamente quando a variável não está definida.
@@ -74,8 +75,18 @@ O modal abre sempre em **"Como votar"**, antes de qualquer pagamento: três pass
 
 Ao tocar em **Já fiz o Pix**, a pessoa apenas confirma, sem digitar nada, e a função registra `confirmed_at`. O administrador busca o código no extrato, confere recebedor e valor de R$ 10,00, e compara o horário do pagamento com a janela do pedido.
 
-A opção do voto fica na fila até a decisão. O código de referência é uma string aleatória sem vínculo com CPF ou documento e permanece no banco apenas para manter a restrição única que impede a reemissão do mesmo código. Após a decisão, a opção sai da fila e permanecem só o placar agregado, um hash antirreuso e o status do protocolo.
+A opção do voto fica na fila até a decisão. O código de referência é uma string aleatória sem vínculo com CPF ou documento, e por isso é mantido depois da decisão — era ele, e não a opção, que precisava de limpeza, e a opção agora permanece para que o recibo possa dizer o que foi validado.
 
-Em `/admin`, a fila mostra o código de referência, o horário do pedido, o horário da confirmação e o prazo, para que o pagamento seja conferido dentro da janela. Pedidos que não foram confirmados nem decididos expiram sozinhos após uma hora e somem da fila.
+### Recibo público: `votequest.com.br/<código>`
+
+Cada código vira a URL de um recibo público: o pagador paga, vê `GASH3MS2` no comprovante e abre `votequest.com.br/gash3ms2`. A página mostra a opção escolhida, o código e o status (`pending`, `review`, `approved`, `rejected` ou `expired`) mais o horário do pedido, da confirmação, do prazo e da decisão.
+
+O recibo tem um botão **Já fiz o Pix**: quem pagou e fechou a tela consegue voltar e registrar a confirmação depois, sem digitar nada. E como o link é do próprio pagador, ele pode mandá-lo a quem quiser provar o voto.
+
+`GET /api/votes/receipt/:code` é público por necessidade (quem tem o link não tem token) e devolve apenas código, opção, status e horários — nunca CPF, nome, dado bancário nem o token administrativo. O código é uma string aleatória de 8 caracteres sobre um alfabeto de 31, o que dá cerca de 8,5×10¹¹ combinações, então não é enumerável. A migration `20261006000000_receipt_url.sql` deixou de apagar a opção na decisão e passou a aceitar `pending` em `votequest_decide_payment`.
+
+### Decisão do administrador
+
+Em `/admin`, a fila mostra o código, um link direto para o recibo do pagador, o horário do pedido, o horário da confirmação e o prazo. **Aprovar e rejeitar funcionam para qualquer item da fila**, inclusive os que o pagador nunca confirmou: antes, `votequest_decide_payment` exigia `status = 'review'`, então quem paga e fecha a tela deixava um pedido que os botões administrativos não conseguiam processar (404) e ele ficava preso até expirar. Pedidos não decididos continuam expirando sozinhos após uma hora e sumindo da fila.
 
 **Segurança:** a chave `service_role` e o token administrativo foram compartilhados na conversa; revogue-os e gere outros antes de usar em produção. Configure segredos somente no Supabase. Revise as regras legais antes de cobrar contribuições ligadas a uma enquete política.
