@@ -518,6 +518,9 @@ a { color: inherit; text-decoration: none; }
 .pix-reference-card > span { color: #728078; font-size: 8px; font-weight: 800; letter-spacing: .12em; }
 .pix-reference-card strong { color: #26372d; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; font-size: 24px; font-weight: 700; letter-spacing: .16em; }
 .pix-reference-card small { color: #858c88; font-size: 10px; line-height: 1.4; }
+.pix-receipt-link { display: inline-flex; align-items: center; gap: 6px; margin: -6px 0 16px; color: #1d8157; font-size: 11px; font-weight: 800; text-decoration: none; }
+.pix-receipt-link:hover { color: #155c40; text-decoration: underline; }
+.pix-receipt-link code { font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; font-weight: 700; }
 .pix-code-heading { display: flex; align-items: center; justify-content: space-between; margin: 0 0 7px; color: #4d5551; font-size: 9px; font-weight: 800; letter-spacing: .12em; }
 .pix-expiry { color: #9a9f9c; font-size: 9px; font-weight: 500; letter-spacing: 0; }
 .pix-expiry--expired { color: #b8523f; font-weight: 700; }

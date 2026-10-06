@@ -546,6 +546,15 @@ function VoteQuestPage() {
                         <small>Aparece como “identificador” no seu comprovante Pix.</small>
                       </div>
 
+                      <a
+                        className="pix-receipt-link"
+                        href={`/${String(intent.referenceCode).toLowerCase()}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Acompanhe seu extrato em votequest.com.br/<code>{intent.referenceCode.toLowerCase()}</code> <Icon name="arrow" size={13} />
+                      </a>
+
                       <div className="pix-receiver">
                         <span>RECEBEDOR INFORMADO NO PIX</span>
                         <strong>{intent.receiverName}</strong>
